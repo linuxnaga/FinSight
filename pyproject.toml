@@ -1,0 +1,35 @@
+[project]
+name = "finsight"
+version = "0.1.0"
+description = "Financial-filings analyst agent on a hosted <=8B model (Capstone Track B)"
+requires-python = ">=3.11"
+dependencies = [
+  "openai>=1.40",
+  "httpx>=0.27",
+  "beautifulsoup4>=4.12",
+  "lxml>=5.0",
+  "rank-bm25>=0.2.2",
+  "numpy>=1.26",
+  "pydantic>=2.6",
+  "fastapi>=0.110",
+  "uvicorn>=0.29",
+  "streamlit>=1.35",
+  "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+# CPU cross-encoder reranker (pulls torch, ~1GB). Without it the pipeline still runs, reranker = "none".
+rerank = ["sentence-transformers>=3.0"]
+# Optional Langfuse export of traces (local JSONL traces always work).
+langfuse = ["langfuse>=2.50"]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["finsight*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

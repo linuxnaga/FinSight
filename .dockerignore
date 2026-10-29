@@ -1,0 +1,20 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.pytest_cache/
+
+# Rebuildable with `make data` / `make index` (hundreds of MB)
+data/raw/
+data/xbrl_cache/
+data/sections/
+data/index/
+data/*.sqlite
+data/traces/
+data/*.log
+
+# keep eval results: they are the weekly evidence of progress
+.git/
+data/
+eval/results/
+*.egg-info/
