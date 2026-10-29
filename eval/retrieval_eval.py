@@ -17,11 +17,13 @@ from eval.run_eval import load_gold
 
 CONFIGS = {
     "bm25 only": dict(use_dense=False, use_rerank=False, use_filters=False),
-    "dense only": dict(use_bm25=False, use_rerank=False, use_filters=False),
-    "hybrid (RRF)": dict(use_rerank=False, use_filters=False),
-    "hybrid + rerank": dict(use_filters=False),
-    "hybrid + rerank + filters": dict(),
     "bm25 + filters": dict(use_dense=False, use_rerank=False),
+    "bm25 + filters + item prior": dict(use_dense=False, use_rerank=False, use_item_prior=True),
+    "dense only": dict(use_bm25=False, use_rerank=False, use_filters=False),
+    "dense + filters": dict(use_bm25=False, use_rerank=False),
+    "hybrid (RRF) + filters": dict(use_rerank=False),
+    "hybrid + filters + item prior": dict(use_rerank=False, use_item_prior=True),
+    "hybrid + filters + rerank": dict(),
 }
 
 
@@ -33,9 +35,14 @@ def main() -> None:
     ix = HybridIndex.load(a.index)
     items = [i for i in load_gold() if i["evidence_doc_ids"]]
     has_dense = ix.vectors is not None
+    from finsight.config import settings
+    from finsight.retrieval.rerank import get_reranker
+    has_rerank = get_reranker(settings().reranker, settings().reranker_model).name != "none"
     rows = []
     for name, cfg in CONFIGS.items():
         if not has_dense and cfg.get("use_dense", True):
+            continue
+        if cfg.get("use_rerank", True) and not has_rerank:
             continue
         rec = {k: [] for k in a.ks}
         for it in items:

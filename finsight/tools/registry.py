@@ -13,11 +13,12 @@ from pydantic import BaseModel, Field, ValidationError
 
 from finsight import tracing
 from finsight.config import COMPANIES, FISCAL_YEARS
-from finsight.tools import xbrl
+from finsight.tools import ratios, xbrl
 from finsight.tools.calc import calculate
 
 TickerT = Literal[tuple(COMPANIES)]  # type: ignore[valid-type]
 MetricT = Literal[tuple(xbrl.CONCEPTS)]  # type: ignore[valid-type]
+RatioT = Literal[tuple(ratios.RATIOS)]  # type: ignore[valid-type]
 
 
 class SearchArgs(BaseModel):
@@ -40,16 +41,34 @@ class CalcArgs(BaseModel):
         description="name -> number, or '$N' to use the value returned by step N")
 
 
+class RatioArgs(BaseModel):
+    ticker: TickerT
+    ratio: RatioT
+    fiscal_year: int
+    metric: MetricT | None = Field(None, description="only for ratio='growth': which metric's YoY growth")
+
+
 class PeerArgs(BaseModel):
     tickers: list[TickerT] = Field(min_length=2, max_length=6)
     metric: MetricT
     fiscal_years: list[int] = Field(min_length=1, max_length=4)
 
 
+def search_years(fy: int | None) -> int | list[int] | None:
+    """Years before the corpus start are still reported as comparatives in the
+    next two 10-Ks (FY2019 figures appear in the FY2020 and FY2021 filings)."""
+    if fy is None or fy in FISCAL_YEARS:
+        return fy
+    if FISCAL_YEARS[0] - 2 <= fy < FISCAL_YEARS[0]:
+        return [y for y in (fy + 1, fy + 2) if y in FISCAL_YEARS]
+    return fy
+
+
 def _search(a: SearchArgs) -> dict:
     from finsight.retrieval.index import default_index
 
-    hits = default_index().search(a.query, k=a.k, ticker=a.ticker, fiscal_year=a.fiscal_year, item=a.item)
+    hits = default_index().search(a.query, k=a.k, ticker=a.ticker, fiscal_year=search_years(a.fiscal_year),
+                                  item=a.item)
     return {"passages": [{"id": h.chunk.chunk_id, "doc_id": h.chunk.doc_id, "url": h.chunk.url,
                           "text": h.chunk.text[:1400]} for h in hits]}
 
@@ -61,6 +80,10 @@ def _fact(a: FactArgs) -> dict:
 def _calc(a: CalcArgs) -> dict:
     v = calculate(a.expression, {k: float(x) for k, x in a.variables.items()})
     return {"expression": a.expression, "variables": a.variables, "value": round(v, 6)}
+
+
+def _ratio(a: RatioArgs) -> dict:
+    return ratios.compute_ratio(a.ticker, a.ratio, a.fiscal_year, a.metric)
 
 
 def _peers(a: PeerArgs) -> dict:
@@ -90,6 +113,9 @@ TOOLS: dict[str, Tool] = {t.name: t for t in [
          "company/year is known.", SearchArgs, _search),
     Tool("get_financial_fact", "Exact reported number for one company, metric and fiscal year from XBRL. "
          "Prefer this over search for any standard financial metric.", FactArgs, _fact, 10),
+    Tool("compute_ratio", "A standard ratio for one company and fiscal year, computed from XBRL with a fixed "
+         "formula (margins, liquidity, leverage, turnover, returns, free cash flow, YoY growth). Prefer this over "
+         "fetching facts and calculating yourself.", RatioArgs, _ratio, 15),
     Tool("calculate", "Arithmetic on numbers from earlier steps (growth %, margins, ratios, differences). "
          "Never do maths yourself.", CalcArgs, _calc, 5),
     Tool("compare_peers", "Same metric for several companies/years in one call.", PeerArgs, _peers, 15),
@@ -104,6 +130,7 @@ def tool_catalog() -> str:
         fields = ", ".join(f"{k}" + ("" if f.is_required() else "?") for k, f in t.args.model_fields.items())
         lines.append(f"- {t.name}({fields}): {t.description}")
     lines.append(f"  metrics: {', '.join(xbrl.CONCEPTS)}")
+    lines.append(f"  ratios: {', '.join(ratios.RATIOS)}")
     lines.append(f"  tickers: {', '.join(f'{k}={v[1]}' for k, v in COMPANIES.items())}")
     lines.append(f"  fiscal years available: {FISCAL_YEARS}")
     return "\n".join(lines)

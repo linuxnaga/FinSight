@@ -27,7 +27,7 @@ from finsight.agent.memory import SessionStore
 from finsight.agent.schemas import Answer, Critique, Plan, PlanStep, Route
 from finsight.config import COMPANIES, FISCAL_YEARS, settings
 from finsight.llm import LLM, BudgetExceeded, StructuredOutputError
-from finsight.tools import xbrl
+from finsight.tools import ratios, xbrl
 from finsight.tools.registry import run_tool, tool_catalog, validate_args
 
 DISCLAIMER = "Draft generated from SEC filings by an AI system - verify figures against the source before use."
@@ -57,6 +57,7 @@ class State:
     steps_used: int = 0
     failures: list[str] = field(default_factory=list)
     injection_flags: int = 0
+    ratio_fast_path: bool = False
 
 
 # ------------------------------------------------------------------ helpers
@@ -87,12 +88,31 @@ def _is_supported(x: float, pool: list[float]) -> bool:
     return False
 
 
+_BOILERPLATE = re.compile(r"(statements? of cash flows?|cash flows? statements?|income statements?|balance sheets?|"
+                         r"statements? of (financial position|income|operations|earnings)|p&l statements?)", re.I)
+# questions asking for an explanation need text, not just a number
+WHY_RE = re.compile(r"\b(why|explain\w*|reasons?|drivers?|drove|driven|how did|describe|tell me about|cause[sd]?|"
+                    r"primarily due)\b", re.I)
+# concept names too generic to match on their own ("cash" appears in "cash dividends")
+_NEEDS_ALIAS = {"cash"}
+_CASH_RE = re.compile(r"\b(cash and (cash )?equivalents|cash balance|cash on hand|cash position)\b", re.I)
+
+
 def detect_metrics(question: str) -> list[str]:
-    q = question.lower()
-    found = []
-    for alias, key in sorted({**xbrl.ALIASES, **{k.replace("_", " "): k for k in xbrl.CONCEPTS}}.items(),
-                             key=lambda kv: -len(kv[0])):
-        if re.search(rf"\b{re.escape(alias)}\b", q) and key not in found:
+    """Metrics mentioned in the question, in order of appearance, longest
+    phrase wins (so "cash dividends" is dividends, not cash)."""
+    q = _BOILERPLATE.sub(" ", question.lower())
+    names = {**{k.replace("_", " "): k for k in xbrl.CONCEPTS if k not in _NEEDS_ALIAS}, **xbrl.ALIASES}
+    hits: list[tuple[int, int, str]] = []
+    for alias in sorted(names, key=len, reverse=True):
+        for m in re.finditer(rf"(?<![\w]){re.escape(alias)}(?![\w])", q):
+            if not any(a <= m.start() < b or a < m.end() <= b for a, b, _ in hits):
+                hits.append((m.start(), m.end(), names[alias]))
+    if _CASH_RE.search(q):
+        hits.append((_CASH_RE.search(q).start(), 0, "cash"))
+    found: list[str] = []
+    for _, _, key in sorted(hits):
+        if key not in found:
             found.append(key)
     return found
 
@@ -145,8 +165,11 @@ class Agent:
             return self._finish(st, f"{', '.join(n.title() for n in ents.outside)} is not in my corpus. I cover: "
                                     f"{', '.join(v[1] for v in COMPANIES.values())} (FY{FISCAL_YEARS[0]}-"
                                     f"FY{FISCAL_YEARS[-1]} 10-Ks).", refused="out_of_corpus")
+        if ents.tickers and not ents.years:
+            # no year given and nothing to inherit: use the latest filing, and say so in the answer
+            ents.years, ents.assumed_year = [FISCAL_YEARS[-1]], True
         bad_years = guard.out_of_range_years(ents)
-        if bad_years and not set(ents.years) & set(FISCAL_YEARS):
+        if bad_years and len(bad_years) == len(ents.years):
             return self._finish(st, f"FY{bad_years[0]} is outside the corpus, which covers FY{FISCAL_YEARS[0]}-"
                                     f"FY{FISCAL_YEARS[-1]} 10-K filings.", refused="out_of_corpus")
 
@@ -177,13 +200,15 @@ class Agent:
             metrics = detect_metrics(st.question)
             n_t, n_y = len(st.entities.tickers), len(st.entities.years)
             # Cheap deterministic routing for the unambiguous cases.
-            if n_t > 1 or (n_y > 1 and metrics and re.search(r"\b(grow|growth|change|increase|decrease|from)\b", st.question.lower())):
+            if self._ratio_plan(st):
+                route = "comparison" if n_t > 1 else "calculation"
+            elif n_t > 1 or (n_y > 1 and metrics and re.search(r"\b(grow|growth|change|increase|decrease|from)\b", st.question.lower())):
                 route = "comparison" if n_t > 1 else "calculation"
             elif metrics and re.search(r"\b(margin|ratio|growth|grew|change|per cent|percent|%|turnover|"
                                        r"return on|yoy|difference)\b", st.question.lower()):
                 route = "calculation"
-            elif len(metrics) == 1 and n_t == 1 and n_y == 1 and \
-                    not re.search(r"\b(why|explain|reason|driver|drove|how did|describe)\b", st.question.lower()):
+            elif len(metrics) == 1 and n_t == 1 and n_y == 1 and not WHY_RE.search(st.question) and not re.search(
+                    r"\b(per|ratio|divided|calculate|compute|times|average|versus|vs|compared)\b", st.question.lower()):
                 route = "lookup"
             else:
                 try:
@@ -195,7 +220,7 @@ class Agent:
                 if route == "out_of_scope" and st.entities.tickers:
                     route = "narrative"
                 if route == "narrative" and metrics and n_t == 1 and n_y == 1 and len(metrics) == 1 and \
-                        not re.search(r"\b(why|explain|reason|driver|how did)\b", st.question.lower()):
+                        not WHY_RE.search(st.question):
                     route = "lookup"
             sp.output = {"route": route, "metrics": metrics}
         return route
@@ -204,6 +229,12 @@ class Agent:
     def _plan(self, st: State, history: list[dict], feedback: list[str] | None = None) -> list[PlanStep]:
         ents = st.entities
         metrics = detect_metrics(st.question)
+        ratio_steps = None if feedback else self._ratio_plan(st)
+        if ratio_steps:
+            st.ratio_fast_path = True
+            with tracing.span("plan", "node", input="ratio fast-path") as sp:
+                sp.output = [p.model_dump() for p in ratio_steps]
+            return ratio_steps
         # Fast path: single-metric lookup needs no LLM planning at all.
         if not feedback and st.route == "lookup" and len(ents.tickers) == 1 and len(ents.years) == 1 \
                 and len(metrics) == 1:
@@ -250,6 +281,43 @@ class Agent:
                 plan = self._fallback_plan(st, metrics)
             sp.output = [p.model_dump() for p in plan]
         return plan
+
+    def _ratio_plan(self, st: State) -> list[PlanStep] | None:
+        """Deterministic plan for standard ratios and single-metric YoY growth.
+        Returns None when the question doesn't fit (the LLM planner takes over)."""
+        ents, q = st.entities, st.question.lower()
+        if not ents.tickers or not ents.years:
+            return None
+        if re.search(r"\b(cagr|over the (last|past)|trend|\d[- ]year|two[- ]year|three[- ]year)\b", q) or \
+                max(ents.years) - min(ents.years) > 1:
+            return None  # multi-year aggregates -> LLM planner ("average X" inside a ratio definition is fine)
+        found = ratios.detect_ratios(st.question)
+        steps: list[PlanStep] = []
+        if found:
+            for t in ents.tickers[:3]:
+                for r in found[:2]:
+                    for y in sorted(ents.years[-2:], reverse=True):  # asked-about year first
+                        steps.append(PlanStep(tool="compute_ratio", args={"ticker": t, "ratio": r, "fiscal_year": y},
+                                              purpose=f"{r} {t} FY{y}"))
+        else:
+            metrics = detect_metrics(st.question)
+            years = ents.years
+            consecutive = len(years) == 1 or (len(years) == 2 and years[1] - years[0] == 1)
+            if len(metrics) == 1 and ratios.GROWTH_RE.search(q) and consecutive:
+                for t in ents.tickers[:3]:
+                    steps.append(PlanStep(tool="compute_ratio", args={"ticker": t, "ratio": "growth",
+                                          "metric": metrics[0], "fiscal_year": years[-1]},
+                                          purpose=f"{metrics[0]} growth {t} FY{years[-1]}"))
+            if not steps and len(metrics) == 1 and len(ents.tickers) > 1:
+                steps.append(PlanStep(tool="compare_peers", args={"tickers": ents.tickers[:6], "metric": metrics[0],
+                                      "fiscal_years": ents.years[-4:]}, purpose=f"{metrics[0]} across companies"))
+        if not steps:
+            return None
+        if WHY_RE.search(q):
+            steps.append(PlanStep(tool="search_filings", args={
+                "query": st.question, "ticker": ents.tickers[0], "fiscal_year": ents.years[-1], "item": "7", "k": 4},
+                purpose="management's explanation"))
+        return steps[:6]
 
     def _fallback_plan(self, st: State, metrics: list[str]) -> list[PlanStep]:
         """When the planner can't produce a valid plan, search with whatever we know."""
@@ -323,6 +391,14 @@ class Agent:
                 u = "USD millions" if r["unit"] == "USD" else r["unit"]
                 add("fact", f"{COMPANIES[r['ticker']][1]} FY{r['fiscal_year']} {out['metric'].replace('_', ' ')} "
                             f"= {v:,.2f} {u}", r["source"], None, [v, float(r["value"])])
+        elif tool == "compute_ratio" and "value" in out:
+            parts = "; ".join(f"{k} = {v['value']:,.2f} {v['unit']}" for k, v in out["inputs"].items())
+            label = out["ratio"].replace("_", " ") if out["ratio"] != "growth" else \
+                f"{(out.get('metric') or '').replace('_', ' ')} YoY growth"
+            add("calc", f"{out['company']} FY{out['fiscal_year']} {label} = {out['value']:,.2f} {out['unit']} "
+                        f"(definition: {out['definition']}; inputs: {parts})",
+                "; ".join(sorted({v["source"] for v in out["inputs"].values()})), None,
+                [float(out["value"])] + [float(v["value"]) for v in out["inputs"].values()])
         elif tool == "calculate" and "value" in out:
             add("calc", f"calculation {out['expression']} with {out['variables']} = {out['value']:,.4f}",
                 "calculator", None, [float(out["value"])])
@@ -365,7 +441,9 @@ class Agent:
             facts = [e for e in st.evidence if e.kind == "fact"]
             if a.value is None and st.route in ("lookup", "calculation"):
                 if calcs:
-                    a.value = calcs[-1].numbers[0]
+                    # ratio fast path: first step is the ratio asked for; planner chains end in the result
+                    primary = calcs[0] if st.ratio_fast_path else calcs[-1]
+                    a.value = primary.numbers[0]
                 elif len(facts) == 1:
                     a.value = facts[0].numbers[0]
             sp.output = a.model_dump()
@@ -424,9 +502,12 @@ class Agent:
         used = set(re.findall(r"E\d+", (a.answer if a else "") + " ".join(a.citations if a else [])))
         citations = [{"id": e.eid, "source": e.source, "url": e.url, "snippet": e.text[:400]}
                      for e in st.evidence if e.eid in used]
+        answer_text = text if text is not None else (a.answer if a else "")
+        if st.entities.assumed_year and not refused:
+            answer_text = f"(No fiscal year given; using FY{st.entities.years[0]}, the latest in the corpus.) " + answer_text
         result = {
             "question": st.question,
-            "answer": text if text is not None else (a.answer if a else ""),
+            "answer": answer_text,
             "value": None if text is not None or a is None else a.value,
             "unit": None if text is not None or a is None else a.unit,
             "insufficient_evidence": bool(a and a.insufficient_evidence),

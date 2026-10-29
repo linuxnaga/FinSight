@@ -9,13 +9,15 @@ Streamlit UI ──► FastAPI (rate limit + cache)
                     │
    guard (rules: refusal, PII, entities, follow-ups)
      → route (rules first, LLM if ambiguous)
-     → plan  (fast path for single-metric lookups, else LLM planner with validated tool args)
+     → plan  (deterministic for lookups, 30+ standard ratios, YoY growth and peer comparisons;
+              otherwise LLM planner with validated tool args)
      → execute (tools, "$N" step refs, fallbacks, loop guard, step cap, token budget)
      → answer (cited, evidence-only)
      → critic (number/citation checks + LLM groundedness for narrative) ──► rewrite / replan (≤2)
                     │ tools
    search_filings (BM25 + dense → RRF → cross-encoder, metadata filters)
-   get_financial_fact (SEC XBRL)   calculate (safe eval)   compare_peers
+   get_financial_fact (SEC XBRL, derived fallbacks)   compute_ratio (fixed formulas)
+   calculate (safe eval)   compare_peers
                     │
    traces → data/traces/*.jsonl (+ Langfuse if configured) → Traces page
 ```
@@ -24,18 +26,27 @@ Streamlit UI ──► FastAPI (rate limit + cache)
 
 | Piece | State |
 |---|---|
-| Corpus: 80 10-Ks downloaded and split into 1,650 Item sections; XBRL facts for 20 companies | ✅ built (`make data`) |
+| Corpus: 80 10-Ks split into 1,648 Item sections; XBRL facts for 20 companies | ✅ built (`make data`) |
 | Eval set: 100 questions (74 FinanceBench + 16 XBRL-exact + 12 safety) | ✅ built; **team must review, then freeze** |
 | BM25 index (26k chunks), retrieval ablation | ✅ runs offline |
-| Dense embeddings, reranker | ⏳ needs course endpoint / `pip install .[rerank]` |
-| Agent, tools, critic, memory, guardrails | ✅ 21 tests passing with a scripted model |
-| API, UI, trace dashboard, Docker | ✅ runs locally |
+| Dense index | ✅ local CPU model (`make index-local`) or course endpoint (`make index`) |
+| Agent, tools, ratio engine, critic, memory, guardrails | ✅ 42 tests passing (scripted model) |
+| API, UI, trace dashboard, Docker, CI | ✅ |
 | Baselines, full eval, live injection test | ⏳ need the endpoint key |
 
-Measured so far, with no LLM involved:
-- **Retrieval:** BM25 recall@5 is 0.22 without metadata filters and **0.78 with company/year filters**.
-- **Injection screen:** the regex catches 5/10 planted injections; the other 5 rely on the prompt and critic, which is what the live test measures.
-- **PII masking:** 4/4 cases masked.
+Measured without any LLM (`make floor`, `make retrieval`, `python -m eval.safety_eval --offline`):
+
+| What | Result |
+|---|---|
+| Numeric gold questions answered exactly by rules + XBRL + ratio tool alone | **26 / 33** |
+| Questions routed and planned with zero LLM calls | **66 / 100** |
+| Refusal / out-of-corpus / injection questions handled by rules | **9 / 10** |
+| Entity extraction (company / fiscal year) on gold questions | **88/88**, **85/88** |
+| XBRL metric coverage (26 metrics × 20 companies × 4 years) | **91%**; the gaps are mostly items a company doesn't report |
+| Retrieval recall@5: BM25 → BM25 + filters → hybrid + filters (local dense) | 0.23 → 0.78 → **0.92** |
+| Prompt-injection regex screen | 5 / 10 (the rest rely on prompt + critic) |
+
+Full history of what changed and why: [docs/progress.md](docs/progress.md).
 
 ## Setup
 
@@ -51,10 +62,11 @@ make ui                     # :8501 (chat, Traces, Evaluation pages)
 # or: docker compose up --build
 ```
 
-**Embedding quota:** the default index embeds 26k chunks (~10M tokens). If the team quota is smaller, use one of these:
+**Embedding quota:** the default index embeds 26k chunks (~10M tokens). Ways to avoid that:
+- Use `make index-local`. It embeds with `BAAI/bge-small-en-v1.5` on CPU (needs `pip install .[rerank]`) and uses no quota. Queries are automatically embedded with the same model that built the index. For Docker, build with `--build-arg RERANK=1`.
 - Raise `--size` to 3000.
 - Restrict the index to Items 1A/7/8.
-- Run `--no-dense` and report BM25 + filters + rerank (already 0.78 recall@5).
+- Run `--no-dense` and report BM25 + filters (0.78 recall@5, vs 0.92 with local dense).
 
 Embeddings are cached by content hash, so re-indexing is free.
 
@@ -67,6 +79,7 @@ Embeddings are cached by content hash, so re-indexing is free.
 | 1 | Write the breakage log from the baseline outputs | n/a | `eval/results/baselines/breakage_log.md` |
 | 2 | Chunking comparison | `python -m finsight.retrieval.index --strategy fixed --name fixed` (+ recursive) then `python -m eval.retrieval_eval --index fixed` | `eval/results/retrieval_*.md` |
 | 2 | Hybrid + rerank ablation | `make retrieval` | same |
+| any | No-LLM floor (rules + XBRL + ratios) | `make floor` | `eval/results/deterministic_floor.md` |
 | 3 | Agent eval on a daily subset | `make eval-quick` | `eval/results/<run>/summary.md` |
 | 3–4 | Full eval + failure taxonomy | `make eval` | same, plus traces |
 | 4 | Injection / PII tests | `make safety` | `eval/results/safety/` |

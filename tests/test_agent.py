@@ -29,22 +29,48 @@ def test_lookup_fast_path_skips_planner(tmp_path):
     assert r["plan"][0]["purpose"] == "direct lookup"
 
 
-def test_calculation_with_step_references(tmp_path):
-    plan = {"steps": [
-        {"tool": "get_financial_fact", "args": {"ticker": "NKE", "metric": "revenue", "fiscal_year": 2023}},
-        {"tool": "get_financial_fact", "args": {"ticker": "NKE", "metric": "revenue", "fiscal_year": 2022}},
-        {"tool": "calculate", "args": {"expression": "(a-b)/b*100", "variables": {"a": "$1", "b": "$2"}}},
-    ]}
-
+def test_growth_uses_ratio_fast_path(tmp_path):
     def answer(user):
-        assert "calculation" in user
-        return {"answer": "Nike revenue grew 9.65% from FY2022 to FY2023 [E3].", "citations": ["E3"]}
+        assert "revenue YoY growth = 9.65" in user
+        return {"answer": "Nike revenue grew 9.65% from FY2022 to FY2023 [E1].", "citations": ["E1"]}
 
-    agent = make_agent(by_role(planner=plan, answer=answer), tmp_path)
+    agent = make_agent(by_role(answer=answer), tmp_path)  # no router/planner scripted: must not be called
     r = agent.run("What was Nike's revenue growth from FY2022 to FY2023?")
-    assert r["route"] == "calculation"
+    assert r["route"] == "calculation" and r["plan"][0]["tool"] == "compute_ratio"
     assert r["value"] == pytest.approx(9.65, abs=0.01)
     assert r["critiques"][0]["action"] == "accept"
+
+
+def test_ratio_with_driver_question_adds_search(tmp_path, monkeypatch):
+    from finsight.tools import registry
+    monkeypatch.setitem(registry.TOOLS, "search_filings", registry.Tool(
+        "search_filings", "", registry.SearchArgs,
+        lambda a: {"passages": [{"id": "x#0", "doc_id": "NKE_2023_10K_item7", "url": None,
+                                 "text": "Gross margin decreased due to higher product costs and markdowns."}]}))
+    agent = make_agent(by_role(answer={"answer": "Nike gross margin was 43.52% [E1], down on higher costs [E2].",
+                                       "citations": ["E1", "E2"]}), tmp_path)
+    r = agent.run("What drove Nike's gross margin in FY2023?")
+    assert [p["tool"] for p in r["plan"]] == ["compute_ratio", "search_filings"]
+
+
+def test_planner_step_references(tmp_path):
+    plan = {"steps": [
+        {"tool": "get_financial_fact", "args": {"ticker": "NKE", "metric": "revenue", "fiscal_year": 2023}},
+        {"tool": "get_financial_fact", "args": {"ticker": "NKE", "metric": "shares_diluted", "fiscal_year": 2023}},
+        {"tool": "calculate", "args": {"expression": "a/b", "variables": {"a": "$1", "b": "$2"}}},
+    ]}
+    agent = make_agent(by_role(router={"route": "calculation"}, planner=plan,
+                               answer=lambda u: {"answer": "Nike revenue per diluted share [E3].", "citations": ["E3"]}),
+                       tmp_path)
+    r = agent.run("Compute Nike's FY2023 revenue per diluted share")
+    calc = [o for o in r["plan"] if o["tool"] == "calculate"]
+    assert calc and r["value"] is not None and r["value"] > 0
+
+
+def test_no_year_defaults_to_latest(tmp_path):
+    agent = make_agent(by_role(answer={"answer": "Nike revenue $51,217 million [E1].", "citations": ["E1"]}), tmp_path)
+    r = agent.run("What is Nike's revenue?")
+    assert r["answer"].startswith("(No fiscal year given; using FY2023")
 
 
 def test_critic_catches_hallucinated_number_and_rewrites(tmp_path):

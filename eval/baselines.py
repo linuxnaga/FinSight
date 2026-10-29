@@ -148,7 +148,8 @@ def main() -> None:
                     except Exception as e:
                         r = {"answer": f"ERROR {e}", "value": None}
                     if item["gold_value"] is not None:
-                        ok = M.numeric_match(r.get("value"), r["answer"], item["gold_value"], item["tolerance"] or .01)
+                        ok = M.numeric_match(r.get("value"), r["answer"], item["gold_value"], item["tolerance"] or .01,
+                                             M.gold_decimals(item["gold_answer"]))
                     elif item["type"] == "unanswerable":
                         ok = M.said_not_found(r)
                     elif judge_llm:

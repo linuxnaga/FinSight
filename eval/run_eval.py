@@ -56,7 +56,7 @@ def score(item: dict, result: dict, judge_llm: LLM | None) -> dict:
         out["method"] = "not_found"
     elif item["gold_value"] is not None:
         out["correct"] = M.numeric_match(result.get("value"), result.get("answer", ""), item["gold_value"],
-                                         item.get("tolerance") or 0.01)
+                                         item.get("tolerance") or 0.01, M.gold_decimals(item["gold_answer"]))
         out["method"] = "numeric"
     elif judge_llm is not None:
         try:

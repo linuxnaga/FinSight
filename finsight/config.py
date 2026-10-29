@@ -46,6 +46,17 @@ COMPANIES: dict[str, tuple[int, str]] = {
 FISCAL_YEARS = [2020, 2021, 2022, 2023]
 
 
+def fiscal_year_of(period_end: str) -> int:
+    """Fiscal year label for a period ending on `period_end` (YYYY-MM-DD).
+
+    Companies name a fiscal year after the calendar year in which it ends
+    (Nike FY2023 ends May 2023, Best Buy FY2023 ends 28 Jan 2023). Exception:
+    52/53-week years that spill a few days into January belong to the prior
+    year (J&J FY2022 ends 1 Jan 2023)."""
+    y, m, d = int(period_end[:4]), int(period_end[5:7]), int(period_end[8:10])
+    return y - 1 if m == 1 and d <= 7 else y
+
+
 def _env(name: str, default: str = "") -> str:
     return os.getenv(name, default)
 

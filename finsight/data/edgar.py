@@ -12,7 +12,7 @@ from pathlib import Path
 
 import httpx
 
-from finsight.config import RAW_DIR, XBRL_DIR, settings
+from finsight.config import RAW_DIR, XBRL_DIR, fiscal_year_of, settings
 
 _last_call = 0.0
 
@@ -66,14 +66,6 @@ def ten_k_filings(cik: int) -> list[dict]:
     return rows
 
 
-def fiscal_year(report_date: str) -> int:
-    """Fiscal year = calendar year in which the fiscal year ends. This matches
-    how every company in the corpus names its years (Nike FY2023 ends May 2023,
-    Best Buy FY2023 ends Jan 2023). XBRL's own `fy` tag is inconsistent
-    across filers, so it is not used."""
-    return int(report_date[:4])
-
-
 def filing_url(cik: int, accession: str, primary_doc: str) -> str:
     return f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession.replace('-', '')}/{primary_doc}"
 
@@ -86,7 +78,7 @@ def download_10ks(ticker: str, cik: int, years: list[int]) -> list[dict]:
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest = []
     for f in ten_k_filings(cik):
-        fy = fiscal_year(f["report_date"])
+        fy = fiscal_year_of(f["report_date"])
         if fy not in years:
             continue
         path = out_dir / f"{fy}.htm"

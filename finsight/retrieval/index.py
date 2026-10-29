@@ -35,6 +35,28 @@ def tokenize(text: str) -> list[str]:
     return [t.rstrip(".") for t in toks if t not in _STOP]
 
 
+# question wording -> the 10-K Items that usually answer it (soft prior, not a filter).
+# Off by default: on the gold set it raised recall@1 (0.40->0.44) but lowered recall@5 (0.78->0.73).
+ITEM_HINTS: list[tuple[re.Pattern, set[str]]] = [
+    (re.compile(r"\b(risk|risks|uncertaint|threat|exposure)\w*", re.I), {"1A", "7A"}),
+    (re.compile(r"\b(industry|business model|products?|customers?|competition|employees|headcount|segments? "
+                r"(do|does)|operate in|acquired|acquisitions?)\b", re.I), {"1", "7"}),
+    (re.compile(r"\b(legal|litigation|lawsuit|proceedings?)\b", re.I), {"3", "8"}),
+    (re.compile(r"\b(revenue|sales|income|margin|expense|cash flow|capex|capital expenditure|assets|liabilit\w+|"
+                r"debt|inventor\w+|receivable|payable|dividend|eps|earnings|ratio|turnover|statement|balance sheet|"
+                r"restructuring|impairment)\b", re.I), {"7", "8"}),
+    (re.compile(r"\b(drove|driver|why|explain|outlook|guidance|forecast|expect)\w*", re.I), {"7"}),
+]
+
+
+def item_prior(query: str) -> set[str]:
+    items: set[str] = set()
+    for rx, its in ITEM_HINTS:
+        if rx.search(query):
+            items |= its
+    return items
+
+
 @dataclass
 class Hit:
     chunk: Chunk
@@ -65,6 +87,7 @@ class HybridIndex:
 
             embedder = Embedder()
             vectors = embedder.embed([c.text for c in chunks], progress=True)
+        emb_meta = {"embed_backend": embedder.backend, "embed_model": embedder.model} if embedder else {}
         out = INDEX_DIR / name
         out.mkdir(parents=True, exist_ok=True)
         with open(out / "chunks.jsonl", "w") as f:
@@ -73,7 +96,7 @@ class HybridIndex:
         if vectors is not None:
             np.save(out / "vectors.npy", vectors)
         (out / "meta.json").write_text(json.dumps({"strategy": strategy, "size": size, "overlap": overlap,
-                                                     "dense": dense, "n_chunks": len(chunks)}))
+                                                     "dense": dense, "n_chunks": len(chunks), **emb_meta}))
         return cls(chunks, vectors, embedder)
 
     @classmethod
@@ -81,10 +104,17 @@ class HybridIndex:
         d = INDEX_DIR / name
         chunks = [Chunk(**json.loads(l)) for l in open(d / "chunks.jsonl")]
         vectors, embedder = None, None
-        if (d / "vectors.npy").exists() and settings().embed_backend == "api":
+        meta = json.loads((d / "meta.json").read_text()) if (d / "meta.json").exists() else {}
+        if (d / "vectors.npy").exists() and settings().embed_backend != "none":
             from finsight.retrieval.embed import Embedder
 
-            vectors, embedder = np.load(d / "vectors.npy"), Embedder()
+            # queries must be embedded by the same model that embedded the chunks
+            try:
+                embedder = Embedder(backend=meta.get("embed_backend"), model=meta.get("embed_model"))
+                vectors = np.load(d / "vectors.npy")
+            except (ImportError, RuntimeError) as e:  # e.g. slim image without sentence-transformers
+                print(f"[index] dense search disabled ({e}); using BM25 only")
+                embedder, vectors = None, None
         return cls(chunks, vectors, embedder)
 
     # --------------------------------------------------------------- search
@@ -104,7 +134,8 @@ class HybridIndex:
 
     def search(self, query: str, k: int = 5, *, ticker=None, fiscal_year=None, item: str | None = None,
                use_bm25: bool = True, use_dense: bool = True, use_rerank: bool = True,
-               use_filters: bool = True, pool: int = 50, rrf_k: int = 60) -> list[Hit]:
+               use_filters: bool = True, use_item_prior: bool = False, pool: int = 50,
+               rrf_k: int = 60) -> list[Hit]:
         with tracing.span("search", "retrieval", input={"q": query, "ticker": ticker, "fy": fiscal_year,
                                                          "item": item, "k": k}) as sp:
             mask = self._mask(ticker, fiscal_year, item) if use_filters else np.ones(len(self.chunks), bool)
@@ -115,13 +146,16 @@ class HybridIndex:
                 for r, j in enumerate(idx[np.argsort(-scores)[:pool]]):
                     ranks.setdefault(int(j), {})["bm25"] = r
             if use_dense and self.vectors is not None and self.embedder is not None:
-                qv = self.embedder.embed([query])[0]
+                qv = self.embedder.embed_query(query)
                 sims = self.vectors[idx] @ qv
                 for r, j in enumerate(idx[np.argsort(-sims)[:pool]]):
                     ranks.setdefault(int(j), {})["dense"] = r
-            # reciprocal rank fusion
-            fused = sorted(((sum(1.0 / (rrf_k + r) for r in src.values()), j, src) for j, src in ranks.items()),
-                           reverse=True)[: max(pool // 2, k)]
+            # reciprocal rank fusion, plus a soft bonus for the Items this kind of question usually lives in
+            prior = item_prior(query) if (use_item_prior and not item) else set()
+            bonus = 1.0 / (rrf_k + 10)
+            fused = sorted(((sum(1.0 / (rrf_k + r) for r in src.values())
+                             + (bonus if self.chunks[j].item in prior else 0.0), j, src)
+                            for j, src in ranks.items()), reverse=True)[: max(pool // 2, k)]
             hits = [Hit(self.chunks[j], s, dict(src)) for s, j, src in fused]
             if use_rerank and hits:
                 rr = get_reranker(settings().reranker, settings().reranker_model)

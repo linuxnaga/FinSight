@@ -12,13 +12,21 @@ from finsight.agent.graph import numbers_in
 FAILURE_TYPES = ["retrieval_miss", "reasoning_error", "tool_call_error", "hallucination", "refusal_error"]
 
 
-def numeric_match(pred_value: float | None, answer_text: str, gold: float, tol: float = 0.01) -> bool:
+def gold_decimals(gold_answer: str) -> int | None:
+    """Decimal places the gold answer was rounded to ("-0.02" -> 2), if it is a bare number."""
+    m = re.fullmatch(r"\s*-?\$?\s*-?[\d,]*\.(\d+)\s*%?\s*", gold_answer or "")
+    return len(m.group(1)) if m else None
+
+
+def numeric_match(pred_value: float | None, answer_text: str, gold: float, tol: float = 0.01,
+                  decimals: int | None = None) -> bool:
     """True if the headline value, or any number in the answer, matches gold
     within relative tolerance, allowing for millions/billions/thousands scale
     and for sign differences on outflows ("capex of 1,749" vs gold -1,749)."""
     cands = ([pred_value] if pred_value is not None else []) + numbers_in(answer_text)
     for c in cands:
-        for scale in (1, 1e3, 1e-3, 1e6, 1e-6):
+        # 1e2 / 1e-2: percent vs fraction ("ROA -1.66%" vs gold "-0.02")
+        for scale in (1, 1e3, 1e-3, 1e6, 1e-6, 1e2, 1e-2):
             v = c * scale
             for g in (gold, -gold):
                 if g == 0:
@@ -26,6 +34,8 @@ def numeric_match(pred_value: float | None, answer_text: str, gold: float, tol: 
                         return True
                 elif abs(v - g) / abs(g) <= tol:
                     return True
+                elif decimals is not None and round(v, decimals) == round(g, decimals):
+                    return True  # gold was rounded coarsely (FinanceBench "-0.02" for -1.53%)
     return False
 
 

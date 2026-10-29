@@ -21,7 +21,7 @@ ALIASES: dict[str, str] = {
     "bestbuy": "BBY", "verizon": "VZ", "corning": "GLW", "cvs": "CVS", "cvs health": "CVS",
     "general mills": "GIS", "nike": "NKE", "aes": "AES", "amazon": "AMZN", "american water works": "AWK",
     "american water": "AWK", "coca-cola": "KO", "coca cola": "KO", "coke": "KO", "johnson & johnson": "JNJ",
-    "johnson and johnson": "JNJ", "j&j": "JNJ", "lockheed martin": "LMT", "lockheed": "LMT", "pfizer": "PFE",
+    "johnson and johnson": "JNJ", "j&j": "JNJ", "jnj": "JNJ", "lockheed martin": "LMT", "lockheed": "LMT", "pfizer": "PFE",
 }
 # Companies a user might ask about that we deliberately don't cover.
 KNOWN_OUTSIDE = ["apple", "tesla", "microsoft", "google", "alphabet", "meta", "facebook", "nvidia", "netflix",
@@ -30,6 +30,8 @@ KNOWN_OUTSIDE = ["apple", "tesla", "microsoft", "google", "alphabet", "meta", "f
 REFUSAL_PATTERNS = [
     (r"\b(should|would|do you recommend|is it (a )?good (time|idea) to)\b.*\b(buy|sell|invest|short|hold)\b", "investment_advice"),
     (r"\b(buy|sell|hold)\b.*\b(stock|shares?)\b.*\?", "investment_advice"),
+    (r"\b(recommend (buying|selling|investing)|stock picker|strong buy|buy rating|"
+     r"which (of these )?stocks? (will|should|to)|will (double|triple|outperform|go up|crash))\b", "investment_advice"),
     (r"\b(price target|target price|stock (price )?(prediction|forecast)|will .* stock (go|rise|fall)|"
      r"predict .* (share|stock) price)\b", "price_prediction"),
     (r"\b(home address|phone number|social security|personal email|salary of (my|our)|ceo'?s? (address|phone))\b",
@@ -67,6 +69,7 @@ class Entities:
     years: list[int] = field(default_factory=list)
     outside: list[str] = field(default_factory=list)
     inherited: bool = False
+    assumed_year: bool = False
 
 
 def mask_pii(text: str) -> tuple[str, list[str]]:
@@ -99,6 +102,9 @@ def extract_entities(question: str, previous: Entities | None = None) -> Entitie
     for short in re.findall(r"\bfy'?(\d{2})\b", q):
         years.append(2000 + int(short))
     years = sorted(set(years))
+    # "what is Boeing forecasting for FY2023?" is answered in the FY2022 10-K
+    if years and re.search(r"\b(forecast\w*|expect\w*|outlook|guidance|anticipat\w*|plan(s|ned)? for|project\w*)\b", q):
+        years = sorted(set(years) | {y - 1 for y in years if y - 1 in FISCAL_YEARS})
     outside = [n for n in KNOWN_OUTSIDE if re.search(rf"\b{n}\b", q)]
     ents = Entities(tickers, years, outside)
     # follow-up: "and the year before?" / "what about Pepsi?" inherit what's missing
@@ -114,7 +120,9 @@ def extract_entities(question: str, previous: Entities | None = None) -> Entitie
 
 
 def out_of_range_years(ents: Entities) -> list[int]:
-    return [y for y in ents.years if y not in FISCAL_YEARS]
+    """Years we cannot answer. The two years before the corpus start are still
+    covered: they appear as comparatives in the FY2020/FY2021 10-Ks."""
+    return [y for y in ents.years if not (FISCAL_YEARS[0] - 2 <= y <= FISCAL_YEARS[-1])]
 
 
 def screen_passage(text: str) -> tuple[str, bool]:
