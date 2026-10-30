@@ -90,6 +90,18 @@ def _is_supported(x: float, pool: list[float]) -> bool:
 
 _BOILERPLATE = re.compile(r"(statements? of cash flows?|cash flows? statements?|income statements?|balance sheets?|"
                          r"statements? of (financial position|income|operations|earnings)|p&l statements?)", re.I)
+# "free cashflow", "cash-flow" -> "cash flow" before metric/ratio detection
+def normalize_terms(text: str) -> str:
+    return re.sub(r"\bcash[\s-]?flows?\b", "cash flow", text, flags=re.I)
+
+
+# yes/no, "which"/"who" and listing questions want facts + text, not a single looked-up number
+CATEGORICAL_RE = re.compile(r"^\s*(are|is|was|were|does|do|did|has|have|had|can|which|who|what (are|were) the)\b|"
+                            r"\b(are there|is there|which|list|name the|any (product|service|segment))\b", re.I)
+# a ratio asked about over time ("improving", "declined") needs the prior year too
+CHANGE_RE = re.compile(r"\b(improv\w*|declin\w*|deteriorat\w*|chang\w*|increas\w*|decreas\w*|"
+                       r"grew|grow\w*|trend\w*|vs\.? (the )?prior)\b", re.I)
+
 # questions asking for an explanation need text, not just a number
 WHY_RE = re.compile(r"\b(why|explain\w*|reasons?|drivers?|drove|driven|how did|describe|tell me about|cause[sd]?|"
                     r"primarily due)\b", re.I)
@@ -101,7 +113,7 @@ _CASH_RE = re.compile(r"\b(cash and (cash )?equivalents|cash balance|cash on han
 def detect_metrics(question: str) -> list[str]:
     """Metrics mentioned in the question, in order of appearance, longest
     phrase wins (so "cash dividends" is dividends, not cash)."""
-    q = _BOILERPLATE.sub(" ", question.lower())
+    q = _BOILERPLATE.sub(" ", normalize_terms(question).lower())
     names = {**{k.replace("_", " "): k for k in xbrl.CONCEPTS if k not in _NEEDS_ALIAS}, **xbrl.ALIASES}
     hits: list[tuple[int, int, str]] = []
     for alias in sorted(names, key=len, reverse=True):
@@ -120,6 +132,7 @@ def detect_metrics(question: str) -> list[str]:
 class Agent:
     def __init__(self, llm: LLM | None = None, store: SessionStore | None = None):
         self._llm = llm
+        self._state: State | None = None
         self.store = store or SessionStore()
         self.s = settings()
 
@@ -138,7 +151,13 @@ class Agent:
             try:
                 result = self._run(question, session)
             except BudgetExceeded as e:
-                result = self._final_error(f"Stopped: {e}", "budget_exceeded")
+                st = self._state
+                if st is not None and st.answer is not None and st.answer.answer:
+                    # out of budget mid-revision: return the best answer so far, flagged
+                    st.failures.append("budget_exceeded")
+                    result = self._finish(st)
+                else:
+                    result = self._final_error(f"Stopped: {e}", "budget_exceeded")
             except Exception as e:  # last-resort guard: the UI always gets an answer object
                 result = self._final_error(f"Internal error: {type(e).__name__}: {e}", "internal_error")
             result.update(trace_id=tr.trace_id, session=session, latency_s=round(time.time() - t0, 2),
@@ -148,6 +167,7 @@ class Agent:
 
     # ============================================================ pipeline
     def _run(self, question: str, session: str) -> dict:
+        self._state = None
         history = self.store.history(session)
         prev = guard.Entities(**history[-1]["entities"]) if history else None
 
@@ -159,6 +179,7 @@ class Agent:
             sp.output = {"pii": pii, "refusal": reason, "tickers": ents.tickers, "years": ents.years,
                          "outside": ents.outside, "inherited": ents.inherited}
         st = State(question=masked, session=session, entities=ents)
+        self._state = st
         if reason:
             return self._finish(st, guard.REFUSAL_TEXT[reason], refused=reason)
         if ents.outside and not ents.tickers:
@@ -207,7 +228,8 @@ class Agent:
             elif metrics and re.search(r"\b(margin|ratio|growth|grew|change|per cent|percent|%|turnover|"
                                        r"return on|yoy|difference)\b", st.question.lower()):
                 route = "calculation"
-            elif len(metrics) == 1 and n_t == 1 and n_y == 1 and not WHY_RE.search(st.question) and not re.search(
+            elif len(metrics) == 1 and n_t == 1 and n_y == 1 and not WHY_RE.search(st.question) and \
+                    not CATEGORICAL_RE.search(st.question) and not re.search(
                     r"\b(per|ratio|divided|calculate|compute|times|average|versus|vs|compared)\b", st.question.lower()):
                 route = "lookup"
             else:
@@ -220,7 +242,7 @@ class Agent:
                 if route == "out_of_scope" and st.entities.tickers:
                     route = "narrative"
                 if route == "narrative" and metrics and n_t == 1 and n_y == 1 and len(metrics) == 1 and \
-                        not WHY_RE.search(st.question):
+                        not WHY_RE.search(st.question) and not CATEGORICAL_RE.search(st.question):
                     route = "lookup"
             sp.output = {"route": route, "metrics": metrics}
         return route
@@ -293,10 +315,13 @@ class Agent:
             return None  # multi-year aggregates -> LLM planner ("average X" inside a ratio definition is fine)
         found = ratios.detect_ratios(st.question)
         steps: list[PlanStep] = []
+        years = list(ents.years)
+        if len(years) == 1 and CHANGE_RE.search(q) and years[0] - 1 >= FISCAL_YEARS[0] - 2:
+            years = [years[0] - 1, years[0]]  # "improving / declined as of FY2022" compares with FY2021
         if found:
             for t in ents.tickers[:3]:
                 for r in found[:2]:
-                    for y in sorted(ents.years[-2:], reverse=True):  # asked-about year first
+                    for y in sorted(years[-2:], reverse=True):  # asked-about year first
                         steps.append(PlanStep(tool="compute_ratio", args={"ticker": t, "ratio": r, "fiscal_year": y},
                                               purpose=f"{r} {t} FY{y}"))
         else:
@@ -436,10 +461,11 @@ class Agent:
                 st.failures.append("tool_call_error:answer_json")
                 a = Answer(answer=e.raw[:1200] or "I could not produce a reliable answer.",
                            insufficient_evidence=not e.raw)
-            # deterministic numeric answer: if a calc or single fact exists, its value is the headline
+            # deterministic headline: when a tool computed the number, it wins over the model's own
+            # (a model-filled value of 0.5489 once replaced the tool's correct 0.5403)
             calcs = [e for e in st.evidence if e.kind == "calc"]
             facts = [e for e in st.evidence if e.kind == "fact"]
-            if a.value is None and st.route in ("lookup", "calculation"):
+            if st.route in ("lookup", "calculation"):
                 if calcs:
                     # ratio fast path: first step is the ratio asked for; planner chains end in the result
                     primary = calcs[0] if st.ratio_fast_path else calcs[-1]

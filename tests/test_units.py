@@ -124,3 +124,22 @@ def test_non_transient_errors_are_not_retried(monkeypatch):
     with pytest.raises(BadRequest):
         LLM(client=client, json_mode="none").chat([{"role": "user", "content": "u"}])
     assert len(calls) == 1
+
+
+def test_spans_opened_inside_tools_join_the_trace(monkeypatch):
+    # tools run in a worker thread; without the caller's context their spans were lost
+    # (agent eval reported retrieval recall@5 = 0.00)
+    from finsight import tracing
+    from finsight.tools import registry
+
+    def fake_search(a):
+        with tracing.span("search", "retrieval") as sp:
+            sp.output = ["NKE_2023_10K_item7#0"]
+        return {"passages": []}
+
+    monkeypatch.setitem(registry.TOOLS, "search_filings",
+                        registry.Tool("search_filings", "", registry.SearchArgs, fake_search))
+    monkeypatch.setattr(tracing, "_persist", lambda t: None)
+    with tracing.trace("q") as t:
+        registry.run_tool("search_filings", {"query": "x"})
+    assert [s.kind for s in t.spans] == ["tool", "retrieval"]

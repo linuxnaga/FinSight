@@ -3,6 +3,44 @@
 Each entry records what changed, why, and the measured effect. The report's "consistent progress" and "what we did
 to compensate for a small model" sections can be drawn directly from here.
 
+## v0.4: first agent evaluation (Qwen2.5-7B, 30-question subset)
+
+### Week-1 baselines (40-question subset, gated scoring, 0 endpoint errors)
+| Strategy | Closed-book | Naive RAG | Oracle evidence |
+|---|---|---|---|
+| few-shot JSON | 23% (numeric 1/11) | 34% (2/11) | 63% (8/11) |
+| CoT + self-consistency | 17% (0/11) | 26% (2/11) | 51% (9/11) |
+| decomposition | 17% (0/11) | 26% (2/11) | 49% (8/11) |
+
+The model knows almost no figures (closed-book numeric 0–1/11); evidence triples accuracy; naive retrieval recovers
+little of that gap; reasoning prompts cost up to 5x the calls and don't beat structured few-shot on a 7B model.
+
+### Agent (`make eval-quick`, run `20261030-110333`)
+| Metric | Value |
+|---|---|
+| End-to-end accuracy | **60% (18/30)** |
+| Computed / lookup | 8/9, 2/2 |
+| Narrative | 4/15 |
+| Refusal / injection / unanswerable | 2/2, 1/1, 1/1 |
+| Task completion | 93% (2 budget overruns) |
+| Avg tool calls / tokens per query | 2.2 / 3,818 |
+| Latency p50 / p95 | 3.9 s / 28.8 s |
+| JSON repairs / failures | **0 / 0** (`json_schema` constrained decoding) |
+
+Different question subset from the baseline, so the comparison is indicative; the full 100-question run gives the exact figure.
+
+### Fixes from reading the agent's failures
+| Failure | Cause | Fix |
+|---|---|---|
+| GIS retention ratio 0.5489 vs gold 0.54 | the model filled its own `value`, and the agent kept it over the tool's correct 0.5403 | a tool-computed number always becomes the headline |
+| Adobe "improving Free cashflow conversion?" → planner failed 4x | "cashflow" (one word) not recognised; one year given for a change question | normalise "cashflow"; change questions also compute the prior year |
+| "Which debt securities…" / "Are there product categories >20% of revenue" | deterministic lookup fast path grabbed yes/no and "which" questions | those go to the router |
+| Amcor acquisitions FY21–23: "Stopped: token budget exceeded" | 12k budget too small for 3-year narrative; overrun discarded the draft | budget 20k; an overrun returns the best answer so far, flagged |
+| Corning tax rate 20.48% → 22.87% marked wrong vs gold "20% → 23%" | strict judge rubric treated rounding as a different figure | rubric: a figure that rounds to the gold figure matches |
+| "retrieval recall@5 (agent searches) 0.00" | tools run in a worker thread without the trace context, so search spans were lost (also missing from the Traces page) | tool threads run in the caller's context |
+
+Each has a regression test built from the live failure (62 tests).
+
 ## v0.3: first run against the course endpoint, evaluation fixes
 
 **Endpoint facts** (found with `make probe`): the course endpoint serves `Qwen/Qwen2.5-7B-Instruct-AWQ`, not Llama.

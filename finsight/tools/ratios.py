@@ -100,7 +100,7 @@ class RatioError(ValueError):
 def detect_ratios(question: str) -> list[str]:
     """Ratios named in the question, in order of appearance (the first is the
     one being asked for; later mentions are usually part of its definition)."""
-    q = question.lower()
+    q = re.sub(r"\bcash[\s-]?flows?\b", "cash flow", question.lower())
     hits: list[tuple[int, int, str]] = []
     for alias in sorted(RATIO_ALIASES, key=len, reverse=True):
         for m in re.finditer(rf"(?<![\w]){re.escape(alias)}(?![\w])", q):

@@ -6,6 +6,7 @@ into the agent loop.
 from __future__ import annotations
 
 import concurrent.futures as cf
+import contextvars
 from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
@@ -151,7 +152,8 @@ def run_tool(name: str, args: dict) -> dict:
             sp.failure = "tool_call_error:bad_args"
             sp.output = {"error": f"invalid arguments: {str(e)[:400]}"}
             return sp.output
-        fut = _pool.submit(TOOLS[name].fn, parsed)
+        # run in the caller's context so spans opened inside the tool (e.g. retrieval) join this trace
+        fut = _pool.submit(contextvars.copy_context().run, TOOLS[name].fn, parsed)
         try:
             out = fut.result(timeout=TOOLS[name].timeout_s)
         except cf.TimeoutError:

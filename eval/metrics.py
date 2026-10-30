@@ -101,7 +101,9 @@ Rubric (score 1-5):
 3 - right direction, but a key figure is wrong or missing
 2 - on topic, but the conclusion differs from gold or most figures are wrong
 1 - contradicts gold, or says "not available / not meaningful / not provided" when gold has an answer
-Rules: a different number for a key figure caps the score at 3 even if the conclusion matches.
+Rules: gold figures are often rounded. A candidate figure that rounds to the gold figure MATCHES
+(20.48% matches gold "20%"; 22.87% matches "23%"; 0.540 matches "0.54").
+A key figure that does not round to the gold figure caps the score at 3 even if the conclusion matches.
 If the gold says "yes"/"consistent"/"increased" and the answer says the opposite, score 1 or 2.
 Judge only correctness versus gold, not style or length."""
 

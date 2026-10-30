@@ -82,7 +82,7 @@ class Settings:
     sec_user_agent: str = field(default_factory=lambda: _env("SEC_USER_AGENT", "FinSight-Capstone contact@example.com"))
 
     max_steps: int = field(default_factory=lambda: int(_env("MAX_STEPS", "10")))
-    max_tokens_per_query: int = field(default_factory=lambda: int(_env("MAX_TOKENS_PER_QUERY", "12000")))
+    max_tokens_per_query: int = field(default_factory=lambda: int(_env("MAX_TOKENS_PER_QUERY", "20000")))
     max_critic_revisions: int = field(default_factory=lambda: int(_env("MAX_CRITIC_REVISIONS", "2")))
     rate_limit_per_min: int = field(default_factory=lambda: int(_env("RATE_LIMIT_PER_MIN", "20")))
 

@@ -121,3 +121,45 @@ def test_step_cap_and_loop_guard(tmp_path, monkeypatch):
                                critic={"supported": True, "answers_question": True}), tmp_path)
     r = agent.run("Explain what drove Nike's revenue in 2023")
     assert r["tool_calls"] == 1 and "loop_detected" in r["failures"]
+
+
+def test_tool_value_overrides_model_value(tmp_path):
+    # live run: the model put its own 0.5489 in `value`; the tool had computed 0.5403
+    agent = make_agent(by_role(answer={"answer": "General Mills retention ratio was 0.5489 [E1].", "value": 0.5489,
+                                       "citations": ["E1"]}), tmp_path)
+    r = agent.run("What is the FY2022 retention ratio (using total cash dividends paid and net income) for General Mills?")
+    assert r["value"] == pytest.approx(0.5403, abs=1e-4)
+
+
+def test_change_question_with_cashflow_spelling_uses_two_years(tmp_path):
+    agent = make_agent(by_role(answer={"answer": "Adobe FCF conversion improved [E1][E2].", "citations": ["E1", "E2"]}),
+                       tmp_path)  # no router/planner scripted: they must not be called
+    r = agent.run("Does Adobe have an improving Free cashflow conversion as of FY2022?")
+    assert [(p["args"]["ratio"], p["args"]["fiscal_year"]) for p in r["plan"]] == \
+        [("fcf_conversion", 2022), ("fcf_conversion", 2021)]
+
+
+@pytest.mark.parametrize("q", [
+    "Which debt securities are registered to trade on a national securities exchange under American Express' name as of 2022?",
+    "Are there any product categories / service categories that represent more than 20% of Boeing's revenue for FY2022?",
+])
+def test_categorical_questions_skip_lookup_fast_path(tmp_path, q):
+    routed = []
+
+    def router(user):
+        routed.append(user)
+        return {"route": "narrative"}
+
+    agent = make_agent(by_role(router=router, planner={"steps": [{"tool": "search_filings", "args": {"query": "x"}}]},
+                               answer={"answer": "See [E1].", "insufficient_evidence": True},
+                               critic={"supported": True, "answers_question": True}), tmp_path)
+    r = agent.run(q)
+    assert routed and r["plan"][0]["purpose"] != "direct lookup"
+
+
+def test_budget_overrun_returns_best_answer(tmp_path):
+    agent = make_agent(by_role(answer={"answer": "Nike revenue was $55,000 million [E1].", "citations": ["E1"]}),
+                       tmp_path)
+    agent.llm.max_tokens_per_query = 100  # the fake client reports 120 tokens per call
+    r = agent.run("What was Nike's revenue in FY2023?")
+    assert "budget_exceeded" in r["failures"] and r["answer"].startswith("Nike revenue")
