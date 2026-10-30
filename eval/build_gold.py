@@ -91,6 +91,7 @@ def financebench(filings) -> list[dict]:
             "unit": "%" if "%" in r["answer"] else None, "tolerance": 0.01,
             "ticker": t, "fiscal_year": fy,
             "evidence_doc_ids": map_evidence(evidence, filings[(t, fy)]), "should_refuse": False,
+            "evidence_text": evidence,
             "justification": r.get("justification", ""),
         })
     return out
@@ -131,6 +132,13 @@ SAFETY = [
 ]
 
 
+def _fact_line(f: dict) -> str:
+    """Oracle evidence for XBRL questions: the reported figure as a filing line."""
+    v = f"{f['value_millions']:,.0f} (USD millions)" if f["value_millions"] is not None else f"{f['value']} ({f['unit']})"
+    return (f"{f['company']} Form 10-K, fiscal year {f['fiscal_year']} (period ending {f['period_end']}): "
+            f"{f['metric'].replace('_', ' ')} {v}")
+
+
 def xbrl_items() -> list[dict]:
     from finsight.config import COMPANIES
 
@@ -142,6 +150,7 @@ def xbrl_items() -> list[dict]:
             f = get_fact(t, m.split("@")[0], yy)
             vals.append(f["value_millions"] if f["value_millions"] is not None else f["value"])
             srcs.append(f["source"])
+        lines = [_fact_line(get_fact(t, m.split("@")[0], y - 1 if m.endswith("@prev") else y)) for m in metrics]
         gold = calculate(expr, dict(zip("ab", vals))) if expr else vals[0]
         unit = "%" if expr and "100" in expr else ("ratio" if expr == "a/b" else
                                                    "USD per share" if "eps" in metrics[0] else "USD millions")
@@ -149,7 +158,8 @@ def xbrl_items() -> list[dict]:
                     "question": tmpl.format(name=COMPANIES[t][1], y=y, p=y - 1),
                     "gold_answer": f"{gold:,.2f} {unit}", "gold_value": round(gold, 4), "unit": unit,
                     "tolerance": 0.01, "ticker": t, "fiscal_year": y,
-                    "evidence_doc_ids": [f"{t}_{y}_10K_item8"], "should_refuse": False, "justification": "; ".join(srcs)})
+                    "evidence_doc_ids": [f"{t}_{y}_10K_item8"], "should_refuse": False, "justification": "; ".join(srcs),
+                    "evidence_text": lines})
     for j, (qtype, tmpl, tickers, y, metric) in enumerate(PEER_QUESTIONS, 1):
         facts = [get_fact(t, metric, y) for t in tickers]
         hi = max(facts, key=lambda f: f["value"])
@@ -160,7 +170,8 @@ def xbrl_items() -> list[dict]:
                     "gold_value": round(diff, 2), "unit": "USD millions", "tolerance": 0.01,
                     "ticker": tickers, "fiscal_year": y,
                     "evidence_doc_ids": [f"{t}_{y}_10K_item8" for t in tickers], "should_refuse": False,
-                    "justification": "; ".join(f["source"] for f in facts)})
+                    "justification": "; ".join(f["source"] for f in facts),
+                    "evidence_text": [_fact_line(f) for f in facts]})
     return out
 
 
@@ -168,7 +179,7 @@ def safety_items() -> list[dict]:
     return [{"id": f"safety_{i:02d}", "source": "handwritten", "type": qtype, "question": q,
              "gold_answer": "REFUSE" if reason else "NOT FOUND", "gold_value": None, "unit": None,
              "tolerance": None, "ticker": None, "fiscal_year": None, "evidence_doc_ids": [],
-             "should_refuse": bool(reason), "expected_refusal": reason, "justification": ""}
+             "should_refuse": bool(reason), "expected_refusal": reason, "justification": "", "evidence_text": []}
             for i, (qtype, q, reason) in enumerate(SAFETY, 1)]
 
 

@@ -18,24 +18,38 @@ def gold_decimals(gold_answer: str) -> int | None:
     return len(m.group(1)) if m else None
 
 
+# millions <-> billions/thousands, and percent <-> fraction ("ROA -1.53%" vs gold "-0.02")
+_SCALES = (1, 1e3, 1e-3, 1e2, 1e-2)
+
+
 def numeric_match(pred_value: float | None, answer_text: str, gold: float, tol: float = 0.01,
                   decimals: int | None = None) -> bool:
-    """True if the headline value, or any number in the answer, matches gold
-    within relative tolerance, allowing for millions/billions/thousands scale
-    and for sign differences on outflows ("capex of 1,749" vs gold -1,749)."""
-    cands = ([pred_value] if pred_value is not None else []) + numbers_in(answer_text)
+    """True if the answer states the gold number.
+
+    * the headline value or any number in the text within `tol` (relative), at
+      a unit scale from _SCALES; the sign may differ only here, for outflows
+      stated as positives ("capex of 1,749" vs gold -1,749)
+    * gold rounded coarsely ("-0.02"): only the HEADLINE value may match by
+      rounding to the gold's decimals, same sign, scale 1 or percent<->fraction.
+      Applying that to every number in the text accepted nearly anything.
+    * gold 0: only an exact 0 counts
+    """
+    # years and small integers in prose ("/ 2", "3 segments") are not answers
+    texts = [n for n in numbers_in(answer_text)
+             if not (float(n).is_integer() and (1990 <= n <= 2035 or abs(n) < 32))]
+    cands = ([pred_value] if pred_value is not None else []) + texts
+    if gold == 0:
+        return any(c == 0 for c in cands)
     for c in cands:
-        # 1e2 / 1e-2: percent vs fraction ("ROA -1.66%" vs gold "-0.02")
-        for scale in (1, 1e3, 1e-3, 1e6, 1e-6, 1e2, 1e-2):
+        for scale in _SCALES:
             v = c * scale
-            for g in (gold, -gold):
-                if g == 0:
-                    if abs(v) < 1e-9:
-                        return True
-                elif abs(v - g) / abs(g) <= tol:
-                    return True
-                elif decimals is not None and round(v, decimals) == round(g, decimals):
-                    return True  # gold was rounded coarsely (FinanceBench "-0.02" for -1.53%)
+            if min(abs(v - gold), abs(v + gold)) / abs(gold) <= tol:
+                return True
+    if pred_value is not None and decimals is not None:
+        for scale in (1, 1e-2, 1e2):
+            if round(pred_value * scale, decimals) == round(gold, decimals) and \
+                    (pred_value == 0 or (pred_value > 0) == (gold > 0)):
+                return True
     return False
 
 

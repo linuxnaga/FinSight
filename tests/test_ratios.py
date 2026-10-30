@@ -45,7 +45,20 @@ def test_detect_metrics_ignores_boilerplate(q, expected):
 def test_numeric_match_handles_rounding_and_percent_vs_fraction():
     assert numeric_match(-1.531, "", -0.02, 0.01, gold_decimals("-0.02"))  # -1.53% vs "-0.02"
     assert numeric_match(4625.0, "", 4.6, 0.01, gold_decimals("$4.60"))    # millions vs billions
+    assert numeric_match(None, "capex was $1,749 million", -1749, 0.01)   # outflow stated as positive
     assert not numeric_match(389.0, "", 0.4, 0.01, gold_decimals("$0.40"))
+
+
+@pytest.mark.parametrize("pred,text,gold,gold_text", [
+    # real false positive from the first baseline run: any number scaled by 1e-6 rounded to 0.02
+    (6.19, "AES's FY2022 ROA is 6.19% (Net income of $1,188 million divided by average total assets of "
+           "($23,039 million + $24,557 million) / 2 = $23,803 million)", -0.02, "-0.02"),
+    (None, "Revenue was $51,217 million in FY2023.", 0.0, "0"),       # gold 0 needs an explicit 0
+    (None, "In FY2022 the ratio was 1.9.", 2022.0, "2022"),           # years are not answers
+    (12.5, "Margin was 12.5%", 0.4, "0.4"),                           # wrong value, no rounding rescue
+])
+def test_numeric_match_rejects_false_positives(pred, text, gold, gold_text):
+    assert not numeric_match(pred, text, gold, 0.01, gold_decimals(gold_text))
 
 
 @has_data

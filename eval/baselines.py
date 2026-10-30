@@ -62,12 +62,16 @@ class Subs(BaseModel):
     subs: list[str]
 
 
-def _context(item: dict, mode: str, sections: dict[str, str], limit: int = 7000) -> str:
+def _context(item: dict, mode: str, sections: dict[str, str], limit: int = 9000) -> str:
     if mode == "closed":
         return ""
     if mode == "oracle":
-        text = "\n\n".join(sections.get(d, "")[: limit // max(1, len(item["evidence_doc_ids"]))]
-                           for d in item["evidence_doc_ids"])
+        # the exact evidence (FinanceBench pages / reported XBRL figures). Gold sections are ~160k
+        # characters, so a section prefix almost never contains the answer.
+        text = "\n\n".join(item.get("evidence_text") or [])[:limit]
+        if not text:
+            text = "\n\n".join(sections.get(d, "")[: limit // max(1, len(item["evidence_doc_ids"]))]
+                               for d in item["evidence_doc_ids"])
     else:
         from finsight.retrieval.index import default_index
 

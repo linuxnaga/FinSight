@@ -3,6 +3,21 @@
 Each entry records what changed, why, and the measured effect. The report's "consistent progress" and "what we did
 to compensate for a small model" sections can be drawn directly from here.
 
+## v0.3: first run against the course endpoint, evaluation fixes
+
+**Endpoint facts** (found with `make probe`): the course endpoint serves `Qwen/Qwen2.5-7B-Instruct-AWQ`, not Llama.
+It supports `json_schema` constrained decoding and has no `/embeddings` route, so dense retrieval uses the local CPU
+model. Gateway errors arrive as HTTP 200 with `{"error": ...}`; `LLM.chat` now reports them clearly.
+
+**Two evaluation bugs found in the first baseline run** (fixed before any results were reported):
+| Bug | Symptom | Fix |
+|---|---|---|
+| Oracle mode passed the first 7,000 characters of the gold *section*, but gold sections are ~160k characters (all of Item 8), so the evidence was usually missing | "oracle" scored barely above closed-book (22.9% vs 14.3%); answers said "not provided in the given excerpts" | gold items now carry `evidence_text` (FinanceBench evidence pages; reported XBRL figures), and oracle mode uses exactly that |
+| The rounding rule matched **any** number in the answer, at any scale and either sign | AES ROA answered 6.19% scored correct vs gold −0.02 (the "/ 2" in the working → 2% → 0.02) | rounding only for the headline value, same sign; scales limited to ×10³ and percent↔fraction; years and small integers in prose ignored; regression tests use the exact failing answer |
+
+Re-scored with the strict metric: few-shot oracle numeric 2/11 → 1/11; other runs unchanged. The no-model floor
+stays at **26/33**: it only ever scored headline values, which the strict rule still allows.
+
 ## v0.2: deterministic layer, data fixes, retrieval options
 
 ### Data correctness
@@ -25,8 +40,8 @@ Remaining numeric misses need the model: 3-year averages and CAGR, a non-standar
 differences that must be stated in prose, and one restructuring question that is answered from text.
 
 ### Scoring
-* `numeric_match` accepts an answer that matches at the gold answer's own rounding (FinanceBench writes
-  ROA −1.53% as "-0.02") and handles percent vs fraction. A test covers the false-positive edge.
+* `numeric_match` accepts the gold answer's own rounding (FinanceBench writes ROA −1.53% as "-0.02") and percent vs
+  fraction, but only for the **headline value** with the same sign. See v0.3 for why.
 
 ### Retrieval
 Section-level recall on the 88 gold questions with evidence. Dense = `BAAI/bge-small-en-v1.5` on CPU
