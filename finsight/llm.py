@@ -29,6 +29,10 @@ class BudgetExceeded(RuntimeError):
     pass
 
 
+class EndpointError(RuntimeError):
+    pass
+
+
 class StructuredOutputError(RuntimeError):
     def __init__(self, msg: str, raw: str):
         super().__init__(msg)
@@ -115,6 +119,12 @@ class LLM:
             if usage is not None:
                 tracing.add_usage(usage.prompt_tokens, usage.completion_tokens)
                 sp.meta["tokens"] = usage.prompt_tokens + usage.completion_tokens
+            if not getattr(resp, "choices", None):
+                # some gateways return errors as HTTP 200 with {"error": {...}} instead of choices
+                err = (getattr(resp, "model_extra", None) or {}).get("error") or getattr(resp, "error", None)
+                msg = err.get("message") if isinstance(err, dict) else str(err or "no choices in response")
+                hint = " Check LLM_MODEL in .env." if "does not exist" in msg else ""
+                raise EndpointError(f"endpoint returned an error instead of a completion: {msg}.{hint}")
             outs = [c.message.content or "" for c in resp.choices]
             sp.output = outs[0][:2000]
         return outs
@@ -176,7 +186,15 @@ def probe() -> None:
     s = settings()
     print(f"endpoint={s.llm_base_url} model={s.llm_model}")
     llm = LLM()
-    print("plain:", llm.text("You are terse.", "Say hi in 3 words.")[:80])
+    try:
+        print("plain:", llm.text("You are terse.", "Say hi in 3 words.")[:80])
+    except EndpointError as e:
+        print(f"FAIL: {e}")
+        # the gateway answers with its default model when none is named: report it
+        raw = llm.client.chat.completions.create(model="", messages=[{"role": "user", "content": "hi"}], max_tokens=1)
+        if getattr(raw, "model", None):
+            print(f"The endpoint's default model is '{raw.model}'. Set LLM_MODEL={raw.model} in .env")
+        return
     for mode in ("json_schema", "json_object", "none"):
         llm.json_mode = mode
         try:

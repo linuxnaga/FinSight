@@ -65,7 +65,7 @@ def _env(name: str, default: str = "") -> str:
 class Settings:
     llm_base_url: str = field(default_factory=lambda: _env("LLM_BASE_URL"))
     llm_api_key: str = field(default_factory=lambda: _env("LLM_API_KEY", "none"))
-    llm_model: str = field(default_factory=lambda: _env("LLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct"))
+    llm_model: str = field(default_factory=lambda: _env("LLM_MODEL", "Qwen/Qwen2.5-7B-Instruct-AWQ"))
     llm_json_mode: str = field(default_factory=lambda: _env("LLM_JSON_MODE", "json_object"))
 
     embed_base_url: str = field(default_factory=lambda: _env("EMBED_BASE_URL") or _env("LLM_BASE_URL"))
