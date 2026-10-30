@@ -99,3 +99,27 @@ def test_xbrl_original_filing_and_derived():
 def test_figure_gate(gold, answer, expected):
     from eval.metrics import figure_gate
     assert figure_gate(gold, answer) is expected
+
+
+def test_judge_cache_and_figure_note(tmp_path, monkeypatch):
+    import eval.metrics as M
+    from tests.fakes import FakeClient
+    from finsight.llm import LLM
+
+    monkeypatch.setattr(M, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(M, "_cache_db", None)
+    seen = []
+
+    def respond(system, user, i):
+        seen.append(user)
+        return {"score": 5, "correct": True, "reason": "ok"}
+
+    llm = LLM(client=FakeClient(respond), json_mode="none")
+    q, gold = "Corning ETR change?", "The effective tax rate changed from 20% in FY2021 to 23% in FY2022."
+    ans = "It increased from 20.48% to 22.87%."
+    a = M.judge(llm, q, gold, ans)
+    b = M.judge(llm, q, gold, ans)  # identical inputs: served from cache, no second model call
+    assert a == b and len(seen) == 1
+    assert "Automatic check" in seen[0] and "20, 23" in seen[0]
+    # a cached "correct" verdict is still overruled when the answer states none of the gold figures
+    assert M.judge(llm, q, gold, "It went up a bit.").correct is False

@@ -120,7 +120,9 @@ def test_step_cap_and_loop_guard(tmp_path, monkeypatch):
                                answer={"answer": "Nike revenue $51,217 million [E1]", "citations": ["E1"]},
                                critic={"supported": True, "answers_question": True}), tmp_path)
     r = agent.run("Explain what drove Nike's revenue in 2023")
-    assert r["tool_calls"] == 1 and "loop_detected" in r["failures"]
+    facts = [p for p in r["plan"] if p["tool"] == "get_financial_fact"]
+    assert len(facts) == 3 and "loop_detected" in r["failures"]
+    assert r["plan"][0]["tool"] == "search_filings"  # led by a search with the question as asked
 
 
 def test_tool_value_overrides_model_value(tmp_path):

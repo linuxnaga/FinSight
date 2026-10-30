@@ -143,3 +143,28 @@ def test_spans_opened_inside_tools_join_the_trace(monkeypatch):
     with tracing.trace("q") as t:
         registry.run_tool("search_filings", {"query": "x"})
     assert [s.kind for s in t.spans] == ["tool", "retrieval"]
+
+
+def test_bad_item_filter_keeps_company_and_year():
+    # live bug: planner passed item="10-K"; the empty match dropped ALL filters and
+    # Boeing questions retrieved Adobe/Verizon filings
+    from finsight.retrieval.chunking import Chunk
+    from finsight.retrieval.index import HybridIndex
+
+    def ch(t, fy, item, text):
+        return Chunk(f"{t}_{fy}_{item}#0", f"{t}_{fy}_10K_item{item}", t, t, fy, item, "", text, "")
+
+    ix = HybridIndex([ch("BA", 2022, "1A", "airline customers cyclical demand"),
+                      ch("BA", 2022, "7", "commercial airplanes deliveries"),
+                      ch("ADBE", 2022, "1A", "customers cyclical demand software")], None)
+    hits = ix.search("customers cyclical", k=3, ticker="BA", fiscal_year=2022, item="10-K", use_rerank=False)
+    assert {h.chunk.ticker for h in hits} == {"BA"}
+    hits = ix.search("customers cyclical", k=3, ticker="BA", fiscal_year=2019, use_rerank=False)
+    assert {h.chunk.ticker for h in hits} == {"BA"}  # no FY2019 chunks: relax the year, keep the company
+
+
+def test_item_argument_is_normalised():
+    from finsight.tools.registry import SearchArgs
+
+    assert [SearchArgs(query="q", item=v).item for v in ("Item 1A", "1a.", "item7", "10-K", "301", None)] == \
+        ["1A", "1A", "7", None, None, None]

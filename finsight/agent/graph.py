@@ -102,6 +102,8 @@ CATEGORICAL_RE = re.compile(r"^\s*(are|is|was|were|does|do|did|has|have|had|can|
 CHANGE_RE = re.compile(r"\b(improv\w*|declin\w*|deteriorat\w*|chang\w*|increas\w*|decreas\w*|"
                        r"grew|grow\w*|trend\w*|vs\.? (the )?prior)\b", re.I)
 
+LEAD_PURPOSE = "search with the question as asked"
+
 # questions asking for an explanation need text, not just a number
 WHY_RE = re.compile(r"\b(why|explain\w*|reasons?|drivers?|drove|driven|how did|describe|tell me about|cause[sd]?|"
                     r"primarily due)\b", re.I)
@@ -301,8 +303,22 @@ class Agent:
                 user = user + "\n\nYour plan had invalid tool arguments:\n" + "\n".join(errors) + "\nFix them."
             if not plan:
                 plan = self._fallback_plan(st, metrics)
+            plan = self._with_question_search(st, plan) if not feedback else plan
             sp.output = [p.model_dump() for p in plan]
         return plan
+
+    def _with_question_search(self, st: State, plan: list[PlanStep]) -> list[PlanStep]:
+        """Lead with a search on the user's own words. The planner's paraphrases ("acquisition major
+        deal") retrieved the gold section far less often than the question itself (recall@5 0.92
+        offline vs 0.12 in the agent), so its passages come first in the evidence."""
+        ents = st.entities
+        if not ents.tickers:
+            return plan
+        years = ents.years[-2:] if len(ents.tickers) == 1 else ents.years[-1:]
+        lead = [PlanStep(tool="search_filings", args={"query": st.question, "ticker": t, "fiscal_year": y, "k": 5},
+                         purpose=LEAD_PURPOSE)
+                for t in ents.tickers[:2] for y in (years or [None])][:2]
+        return (lead + plan)[: self.s.max_steps]
 
     def _ratio_plan(self, st: State) -> list[PlanStep] | None:
         """Deterministic plan for standard ratios and single-metric YoY growth.
@@ -363,7 +379,8 @@ class Agent:
             key = json.dumps([step.tool, args], sort_keys=True, default=str)
             if key in seen:  # identical call already made -> loop guard
                 st.failures.append("loop_detected")
-                st.outputs.append({"tool": step.tool, "args": args, "out": {"skipped": "duplicate call"}})
+                st.outputs.append({"tool": step.tool, "args": args, "out": {"skipped": "duplicate call"},
+                                   "lead": step.purpose == LEAD_PURPOSE})
                 continue
             seen.add(key)
             st.steps_used += 1
@@ -374,7 +391,7 @@ class Agent:
                 fb_args = {"query": f"{args.get('metric', '').replace('_', ' ')} consolidated statement",
                            "ticker": args.get("ticker"), "fiscal_year": args.get("fiscal_year"), "item": "8", "k": 4}
                 out = {**out, "fallback": run_tool("search_filings", fb_args)}
-            st.outputs.append({"tool": step.tool, "args": args, "out": out})
+            st.outputs.append({"tool": step.tool, "args": args, "out": out, "lead": step.purpose == LEAD_PURPOSE})
             self._collect_evidence(st, step.tool, out)
 
     def _resolve_refs(self, step: PlanStep, st: State, base: int) -> dict:
@@ -385,7 +402,9 @@ class Agent:
         for name, v in args.get("variables", {}).items():
             if isinstance(v, str) and re.fullmatch(r"\$\d+", v.strip()):
                 n = int(v.strip()[1:])
-                ref = st.outputs[base + n - 1]["out"] if 0 < n <= len(st.outputs) - base else {}
+                # "$N" is the planner's own step N: the lead question searches don't count
+                own = [o for o in st.outputs[base:] if not o.get("lead")]
+                ref = own[n - 1]["out"] if 0 < n <= len(own) else {}
                 if "value_millions" in ref and ref["value_millions"] is not None:
                     resolved[name] = ref["value_millions"]
                 elif "value" in ref:

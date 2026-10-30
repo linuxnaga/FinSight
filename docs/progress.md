@@ -3,6 +3,31 @@
 Each entry records what changed, why, and the measured effect. The report's "consistent progress" and "what we did
 to compensate for a small model" sections can be drawn directly from here.
 
+## v0.5: second agent run, judge stability, narrative retrieval
+
+**Agent rerun** (`20261030-143138`, same 30 questions): **63% (19/30)**, up from 60%. Task completion **100%**
+(was 93%), computed **9/9**, hallucinations 0, 429 retries 3. Narrative still 4/15.
+
+**The judge, not the agent, caused both "regressions".** Two Boeing answers were word-for-word identical in both
+runs, yet the judge passed them once and failed them the next time, after a one-line rubric change. The 7B judge
+also kept failing Corning's 20.48% → 22.87% against gold "20% → 23%" despite the rounding rule. Fixes:
+* **verdict cache** keyed by rubric version: identical answers get identical verdicts, so run-to-run differences
+  measure the agent
+* **figure note**: when the deterministic check confirms the gold's figures at its precision, the judge is told so
+  and grades the conclusion only. Live re-judging: Corning and Boeing production rates now pass. Boeing cyclicality
+  is still failed ("does not explicitly state…" when it does), a remaining judge error for the human audit to quantify
+
+**Why narrative questions failed: the agent's searches, not the index.** Agent search recall@5 was 0.12, against
+0.92 for the same index offline. Traces showed:
+| Bug | Effect | Fix |
+|---|---|---|
+| planner passed `item="10-K"`, `"10K"`, `"301"`; nothing matched, and the fallback dropped *all* filters | Boeing questions retrieved Adobe, Verizon and General Mills filings | item values validated (junk means no preference); filters relax least-important-first and never drop the company |
+| a planner-chosen item was a hard filter | all 5 passages from one (often wrong) section, e.g. Item 7 when the answer is in Item 1A | the item is a soft preference: unfiltered results plus up to 2 from that item |
+| paraphrased queries ("acquisition major deal") | missed the right passages | LLM-planned questions are led by a search with the question as asked; `$N` step references skip it |
+
+Offline check with the agent's own entity extraction: the lead search finds a gold section for **48/55 narrative
+questions (87%)**, with **0** results from another company. 65 tests.
+
 ## v0.4: first agent evaluation (Qwen2.5-7B, 30-question subset)
 
 ### Week-1 baselines (40-question subset, gated scoring, 0 endpoint errors)

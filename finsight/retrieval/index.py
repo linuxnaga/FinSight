@@ -122,15 +122,20 @@ class HybridIndex:
         m = np.ones(len(self.chunks), dtype=bool)
         tickers = [ticker] if isinstance(ticker, str) else ticker
         years = [fiscal_year] if isinstance(fiscal_year, int) else fiscal_year
+        # relax the least important filter first, never the company: an item filter that
+        # matched nothing used to drop ALL filters and return other companies' filings
+        layers = []
         if tickers:
-            m &= np.array([c.ticker in tickers for c in self.chunks])
+            layers.append(np.array([c.ticker in tickers for c in self.chunks]))
         if years:
-            m &= np.array([c.fiscal_year in years for c in self.chunks])
+            layers.append(np.array([c.fiscal_year in years for c in self.chunks]))
         if item:
-            m &= np.array([c.item == item.upper() for c in self.chunks])
-        if not m.any():  # a bad filter must not return nothing; fall back to unfiltered
-            return np.ones(len(self.chunks), dtype=bool)
-        return m
+            layers.append(np.array([c.item == item.upper() for c in self.chunks]))
+        for n in range(len(layers), 0, -1):
+            m = np.logical_and.reduce(layers[:n]) if n > 1 else layers[0]
+            if m.any():
+                return m
+        return np.ones(len(self.chunks), dtype=bool)
 
     def search(self, query: str, k: int = 5, *, ticker=None, fiscal_year=None, item: str | None = None,
                use_bm25: bool = True, use_dense: bool = True, use_rerank: bool = True,

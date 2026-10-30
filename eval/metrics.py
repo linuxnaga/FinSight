@@ -2,12 +2,16 @@
 retrieval recall@k, and the failure taxonomy."""
 from __future__ import annotations
 
+import hashlib
+import json
 import re
+import sqlite3
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from finsight.agent.graph import numbers_in
+from finsight.config import DATA_DIR
 
 FAILURE_TYPES = ["retrieval_miss", "reasoning_error", "tool_call_error", "hallucination", "refusal_error"]
 
@@ -133,31 +137,62 @@ def key_figures(gold_answer: str) -> list[tuple[float, float]]:
     return out
 
 
-def figure_gate(gold_answer: str, answer: str) -> bool | None:
-    """Deterministic check under the LLM judge. None if the gold states no key
-    figures; otherwise True only if the answer states at least one of them at
-    the gold's precision (unit scales x1, x1e3, x1e-3). The judge may fail an
-    answer that passes, never rescue one that fails: a 7B judge accepted
-    "turnover is not meaningful" for gold 9.5x."""
+def matched_figures(gold_answer: str, answer: str) -> list[float] | None:
+    """Gold key figures the answer states at the gold's precision (unit scales
+    x1, x1e3, x1e-3). None if the gold states no key figures."""
     figs = key_figures(gold_answer)
     if not figs:
         return None
     cands = [n for n in numbers_in(answer or "") if not (float(n).is_integer() and 1990 <= n <= 2035)]
-    for g, tol in figs:
-        for c in cands:
-            for scale in (1, 1e3, 1e-3):
-                if abs(abs(c * scale) - g) <= tol:
-                    return True
-    return False
+    return [g for g, tol in figs if any(abs(abs(c * sc) - g) <= tol for c in cands for sc in (1, 1e3, 1e-3))]
 
 
-def judge(llm, question: str, gold: str, answer: str) -> Judgement:
+def figure_gate(gold_answer: str, answer: str) -> bool | None:
+    """Deterministic check under the LLM judge. None if the gold states no key
+    figures; otherwise True only if the answer states at least one of them at
+    the gold's precision. The judge may fail an answer that passes, never
+    rescue one that fails: a 7B judge accepted "turnover is not meaningful"
+    for gold 9.5x."""
+    m = matched_figures(gold_answer, answer)
+    return None if m is None else bool(m)
+
+
+_FIGURE_NOTE = ("Automatic check: the candidate states the gold's key figure(s) {figs} at the gold's precision "
+                "(rounding already accounted for). Treat those figures as matching; grade the conclusion and "
+                "completeness only.")
+# verdicts are cached per rubric version: identical answers get identical verdicts across runs,
+# so run-to-run differences measure the agent, not judge noise (a 7B judge flipped on identical text)
+JUDGE_VERSION = hashlib.sha1((JUDGE_PROMPT + _FIGURE_NOTE).encode()).hexdigest()[:10]
+_cache_db: sqlite3.Connection | None = None
+
+
+def _cache() -> sqlite3.Connection:
+    global _cache_db
+    if _cache_db is None:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        _cache_db = sqlite3.connect(DATA_DIR / "judge_cache.sqlite", check_same_thread=False)
+        _cache_db.execute("CREATE TABLE IF NOT EXISTS j (k TEXT PRIMARY KEY, v TEXT)")
+    return _cache_db
+
+
+def judge(llm, question: str, gold: str, answer: str, use_cache: bool = True) -> Judgement:
+    matched = matched_figures(gold, answer)
     user = f"Question: {question}\n\nGold answer: {gold}\n\nCandidate answer: {answer}"
-    j = llm.structured(JUDGE_PROMPT, user, Judgement, name="judge", max_tokens=150)
-    j.correct = j.score >= 4
-    if j.correct and figure_gate(gold, answer) is False:
-        j.correct = False
-        j.reason = f"[figure gate: none of the gold's key figures {[v for v, _ in key_figures(gold)]} stated] {j.reason}"
+    if matched:
+        user += "\n\n" + _FIGURE_NOTE.format(figs=", ".join(f"{v:g}" for v in matched))
+    key = hashlib.sha1(f"{JUDGE_VERSION}\x00{user}".encode()).hexdigest()
+    row = _cache().execute("SELECT v FROM j WHERE k=?", (key,)).fetchone() if use_cache else None
+    if row:
+        j = Judgement.model_validate_json(row[0])
+    else:
+        j = llm.structured(JUDGE_PROMPT, user, Judgement, name="judge", max_tokens=150)
+        j.correct = j.score >= 4
+        if use_cache:
+            _cache().execute("INSERT OR REPLACE INTO j VALUES (?, ?)", (key, j.model_dump_json()))
+            _cache().commit()
+    if j.correct and matched == []:  # the gold states figures and the answer states none of them
+        j = j.model_copy(update={"correct": False, "reason": f"[figure gate: none of the gold's key figures "
+                                 f"{[v for v, _ in key_figures(gold)]} stated] {j.reason}"})
     return j
 
 

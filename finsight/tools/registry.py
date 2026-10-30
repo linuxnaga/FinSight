@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import concurrent.futures as cf
 import contextvars
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from finsight import tracing
 from finsight.config import COMPANIES, FISCAL_YEARS
@@ -26,8 +27,18 @@ class SearchArgs(BaseModel):
     query: str = Field(description="what to look for, in filing language")
     ticker: TickerT | None = None
     fiscal_year: int | None = None
-    item: str | None = Field(None, description="10-K item, e.g. '1A' risk factors, '7' MD&A, '8' financials")
+    item: str | None = Field(None, description="optional preferred 10-K item: '1' business, '1A' risk factors, "
+                                               "'7' MD&A, '8' financial statements")
     k: int = Field(5, ge=1, le=8)
+
+    @field_validator("item", mode="before")
+    @classmethod
+    def _norm_item(cls, v):
+        """Accept 'Item 1A', '1a.', 'item7'; anything else ('10-K', '301') means no preference."""
+        if v is None:
+            return None
+        m = re.fullmatch(r"\s*(?:item\s*)?(1a|1b|1c|7a|9a|9b|9c|1[0-6]|[1-9])\.?\s*", str(v), re.I)
+        return m.group(1).upper() if m else None
 
 
 class FactArgs(BaseModel):
@@ -68,8 +79,14 @@ def search_years(fy: int | None) -> int | list[int] | None:
 def _search(a: SearchArgs) -> dict:
     from finsight.retrieval.index import default_index
 
-    hits = default_index().search(a.query, k=a.k, ticker=a.ticker, fiscal_year=search_years(a.fiscal_year),
-                                  item=a.item)
+    ix, years = default_index(), search_years(a.fiscal_year)
+    # the item is a preference, not a hard filter: the planner often picks the wrong section
+    # (risk discussions it looks for in MD&A), and a hard filter returned one section only
+    hits = ix.search(a.query, k=a.k, ticker=a.ticker, fiscal_year=years)
+    if a.item:
+        have = {h.chunk.chunk_id for h in hits}
+        hits += [h for h in ix.search(a.query, k=2, ticker=a.ticker, fiscal_year=years, item=a.item)
+                 if h.chunk.chunk_id not in have]
     return {"passages": [{"id": h.chunk.chunk_id, "doc_id": h.chunk.doc_id, "url": h.chunk.url,
                           "text": h.chunk.text[:1400]} for h in hits]}
 
