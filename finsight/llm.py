@@ -13,8 +13,11 @@ Run `python -m finsight.llm --probe` to see which JSON modes the endpoint accept
 from __future__ import annotations
 
 import json
+import random
 import re
 import sys
+import threading
+import time
 from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
@@ -40,7 +43,34 @@ class StructuredOutputError(RuntimeError):
 
 
 # Counters the eval report reads (reset per eval run).
-STATS = {"calls": 0, "json_repairs": 0, "json_failures": 0, "mode_downgrades": 0}
+STATS = {"calls": 0, "json_repairs": 0, "json_failures": 0, "mode_downgrades": 0, "rate_limited": 0}
+
+
+class RatePacer:
+    """Process-wide pacing: at most `rpm` requests per minute, evenly spaced.
+    The course endpoint rate-limits (HTTP 429) without advertising its limit."""
+
+    def __init__(self, rpm: float):
+        self.interval = 60.0 / rpm if rpm > 0 else 0.0
+        self._next = 0.0
+        self._lock = threading.Lock()
+
+    def wait(self) -> None:
+        if not self.interval:
+            return
+        with self._lock:
+            now = time.monotonic()
+            start = max(now, self._next)
+            self._next = start + self.interval
+        if start > now:
+            time.sleep(start - now)
+
+
+_pacer: RatePacer | None = None
+
+
+def _status(e: Exception) -> int | None:
+    return getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
 
 
 def extract_json(text: str) -> Any:
@@ -89,18 +119,47 @@ def extract_json(text: str) -> Any:
 class LLM:
     def __init__(self, client: Any = None, model: str | None = None, json_mode: str | None = None):
         s = settings()
+        self._paced = client is None  # pace only the real endpoint, not injected test clients
         if client is None:
             from openai import OpenAI
 
             if not s.llm_base_url:  # never fall through to api.openai.com by accident
                 raise RuntimeError("LLM_BASE_URL is not set: copy .env.example to .env and add the course endpoint")
-            client = OpenAI(base_url=s.llm_base_url, api_key=s.llm_api_key, timeout=60, max_retries=2)
+            # retries are ours (see _create): the SDK's 2 quick retries are not enough for 429s
+            client = OpenAI(base_url=s.llm_base_url, api_key=s.llm_api_key, timeout=90, max_retries=0)
         self.client = client
         self.model = model or s.llm_model
         self.json_mode = json_mode or s.llm_json_mode
         self.max_tokens_per_query = s.max_tokens_per_query
 
     # ------------------------------------------------------------------ raw
+    def _create(self, kwargs: dict) -> Any:
+        """One completion with pacing, and exponential backoff on 429 / 5xx / timeouts
+        (honouring Retry-After when the server sends it)."""
+        global _pacer
+        s = settings()
+        if _pacer is None:
+            _pacer = RatePacer(s.llm_max_rpm)
+        delay = 2.0
+        for attempt in range(s.llm_max_retries + 1):
+            if self._paced:
+                _pacer.wait()
+            try:
+                return self.client.chat.completions.create(**kwargs)
+            except Exception as e:
+                code = _status(e)
+                transient = code == 429 or (code is not None and code >= 500) or \
+                    type(e).__name__ in ("APITimeoutError", "APIConnectionError")
+                if not transient or attempt == s.llm_max_retries:
+                    raise
+                if code == 429:
+                    STATS["rate_limited"] += 1
+                retry_after = getattr(getattr(e, "response", None), "headers", {}).get("retry-after")
+                wait = float(retry_after) if retry_after and retry_after.replace(".", "").isdigit() else delay
+                time.sleep(min(wait, 60) + random.uniform(0, 1))
+                delay = min(delay * 2, 60)
+        raise RuntimeError("unreachable")
+
     def chat(self, messages: list[dict], *, name: str = "chat", temperature: float = 0.0,
              max_tokens: int = 700, response_format: dict | None = None, n: int = 1) -> list[str]:
         t = tracing.current()
@@ -114,7 +173,7 @@ class LLM:
             kwargs["response_format"] = response_format
         with tracing.span(name, "llm", input=messages[-1]["content"][-2000:], temperature=temperature) as sp:
             STATS["calls"] += 1
-            resp = self.client.chat.completions.create(**kwargs)
+            resp = self._create(kwargs)
             usage = getattr(resp, "usage", None)
             if usage is not None:
                 tracing.add_usage(usage.prompt_tokens, usage.completion_tokens)

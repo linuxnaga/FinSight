@@ -67,6 +67,9 @@ class Settings:
     llm_api_key: str = field(default_factory=lambda: _env("LLM_API_KEY", "none"))
     llm_model: str = field(default_factory=lambda: _env("LLM_MODEL", "Qwen/Qwen2.5-7B-Instruct-AWQ"))
     llm_json_mode: str = field(default_factory=lambda: _env("LLM_JSON_MODE", "json_object"))
+    # pacing + retry for the shared endpoint (it returns 429 without saying what the limit is)
+    llm_max_rpm: float = field(default_factory=lambda: float(_env("LLM_MAX_RPM", "20")))
+    llm_max_retries: int = field(default_factory=lambda: int(_env("LLM_MAX_RETRIES", "6")))
 
     embed_base_url: str = field(default_factory=lambda: _env("EMBED_BASE_URL") or _env("LLM_BASE_URL"))
     embed_api_key: str = field(default_factory=lambda: _env("EMBED_API_KEY") or _env("LLM_API_KEY", "none"))

@@ -27,6 +27,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from finsight.config import SECTIONS_DIR
+from finsight import llm as llm_mod
 from finsight.llm import LLM, StructuredOutputError
 from eval import metrics as M
 from eval.run_eval import load_gold
@@ -143,15 +144,18 @@ def main() -> None:
     for strategy in a.strategies:
         for mode in a.modes:
             path = out_dir / f"{strategy}__{mode}.jsonl"
-            correct = scored = 0
+            correct = scored = errors = 0
             t0 = time.time()
             with open(path, "w") as f:
                 for item in items:
                     try:
                         r = run_one(llm, strategy, item, _context(item, mode, sections), a.n_sc)
                     except Exception as e:
-                        r = {"answer": f"ERROR {e}", "value": None}
-                    if item["gold_value"] is not None:
+                        r = {"answer": f"ERROR {e}", "value": None, "error": True}
+                    if r.get("error"):
+                        ok = None  # endpoint failure, not a wrong answer: excluded and counted separately
+                        errors += 1
+                    elif item["gold_value"] is not None:
                         ok = M.numeric_match(r.get("value"), r["answer"], item["gold_value"], item["tolerance"] or .01,
                                              M.gold_decimals(item["gold_answer"]))
                     elif item["type"] == "unanswerable":
@@ -160,18 +164,21 @@ def main() -> None:
                         try:
                             ok = M.judge(judge_llm, item["question"], item["gold_answer"], r["answer"]).correct
                         except Exception:
-                            ok = False
+                            ok = None  # the judge failed, not the answer
+                            errors += 1
                     else:
                         ok = None
                     if ok is not None:
                         scored += 1
                         correct += ok
                     f.write(json.dumps({"id": item["id"], "type": item["type"], "correct": ok, **r}) + "\n")
-            row = (strategy, mode, correct, scored, time.time() - t0)
+            row = (strategy, mode, correct, scored, errors)
             table.append(row)
-            print(f"{strategy:13s} {mode:9s} {correct}/{scored} = {correct / max(1, scored):.1%}")
-    md = ["| strategy | context | accuracy |", "|---|---|---|"] + \
-         [f"| {s} | {m} | {c}/{n} ({c / max(1, n):.0%}) |" for s, m, c, n, _ in table]
+            print(f"{strategy:13s} {mode:9s} {correct}/{scored} = {correct / max(1, scored):.1%}"
+                  + (f"   ({errors} endpoint errors excluded)" if errors else "")
+                  + f"   [429 retries so far: {llm_mod.STATS['rate_limited']}]", flush=True)
+    md = ["| strategy | context | accuracy | endpoint errors |", "|---|---|---|---|"] + \
+         [f"| {s} | {m} | {c}/{n} ({c / max(1, n):.0%}) | {e} |" for s, m, c, n, e in table]
     (out_dir / "baseline_table.md").write_text("\n".join(md) + "\n")
     print("\n".join(md))
 

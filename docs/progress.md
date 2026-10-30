@@ -15,6 +15,13 @@ model. Gateway errors arrive as HTTP 200 with `{"error": ...}`; `LLM.chat` now r
 | Oracle mode passed the first 7,000 characters of the gold *section*, but gold sections are ~160k characters (all of Item 8), so the evidence was usually missing | "oracle" scored barely above closed-book (22.9% vs 14.3%); answers said "not provided in the given excerpts" | gold items now carry `evidence_text` (FinanceBench evidence pages; reported XBRL figures), and oracle mode uses exactly that |
 | The rounding rule matched **any** number in the answer, at any scale and either sign | AES ROA answered 6.19% scored correct vs gold −0.02 (the "/ 2" in the working → 2% → 0.02) | rounding only for the headline value, same sign; scales limited to ×10³ and percent↔fraction; years and small integers in prose ignored; regression tests use the exact failing answer |
 
+**Rate limiting.** The rerun showed oracle at 34.3% vs 14.3% closed-book (the oracle fix works), but about half of all
+requests had failed with HTTP 429 and were scored as wrong answers. The endpoint rate-limits without advertising
+a limit, so the client now paces requests (`LLM_MAX_RPM`, default 20/min) and retries 429/5xx with exponential
+backoff (`LLM_MAX_RETRIES`, default 6). Baselines and the eval exclude calls that still fail (including judge
+failures) from accuracy and report them in their own column. In a live check (4 calls while another run was
+saturating the endpoint), five 429s were retried and all 4 calls succeeded.
+
 Re-scored with the strict metric: few-shot oracle numeric 2/11 → 1/11; other runs unchanged. The no-model floor
 stays at **26/33**: it only ever scored headline values, which the strict rule still allows.
 

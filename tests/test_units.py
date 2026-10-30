@@ -83,3 +83,44 @@ def test_error_returned_as_http_200_is_reported_clearly():
 
     with pytest.raises(EndpointError, match="Check LLM_MODEL"):
         LLM(client=ErrClient(), json_mode="none").text("s", "u")
+
+
+def test_rate_limit_is_retried_with_backoff(monkeypatch):
+    import finsight.llm as L
+    from types import SimpleNamespace
+
+    class RateLimited(Exception):
+        status_code = 429
+
+    calls = []
+
+    def create(**kw):
+        calls.append(1)
+        if len(calls) < 3:
+            raise RateLimited("Error code: 429")
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))], usage=None)
+
+    monkeypatch.setattr(L.time, "sleep", lambda s: None)
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    before = L.STATS["rate_limited"]
+    assert LLM(client=client, json_mode="none").text("s", "u") == "ok"
+    assert len(calls) == 3 and L.STATS["rate_limited"] - before == 2
+
+
+def test_non_transient_errors_are_not_retried(monkeypatch):
+    import finsight.llm as L
+    from types import SimpleNamespace
+
+    class BadRequest(Exception):
+        status_code = 400
+
+    calls = []
+
+    def create(**kw):
+        calls.append(1)
+        raise BadRequest("bad")
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    with pytest.raises(BadRequest):
+        LLM(client=client, json_mode="none").chat([{"role": "user", "content": "u"}])
+    assert len(calls) == 1

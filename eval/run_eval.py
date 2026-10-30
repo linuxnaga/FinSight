@@ -62,8 +62,8 @@ def score(item: dict, result: dict, judge_llm: LLM | None) -> dict:
         try:
             j = M.judge(judge_llm, item["question"], item["gold_answer"], result.get("answer", ""))
             out.update(correct=j.correct, judge_score=j.score, judge_reason=j.reason, method="judge")
-        except Exception as e:
-            out.update(correct=False, method="judge_error", judge_reason=str(e)[:200])
+        except Exception as e:  # the judge failed, not the answer: exclude rather than count as wrong
+            out.update(correct=None, method="judge_error", judge_reason=str(e)[:200])
     else:
         out.update(correct=None, method="unscored")
     return out
@@ -83,7 +83,7 @@ def main() -> None:
     judge_llm = None if a.no_judge else LLM()
     out_dir = HERE / "results" / a.name
     out_dir.mkdir(parents=True, exist_ok=True)
-    llm_mod.STATS.update(calls=0, json_repairs=0, json_failures=0, mode_downgrades=0)
+    llm_mod.STATS.update(calls=0, json_repairs=0, json_failures=0, mode_downgrades=0, rate_limited=0)
 
     rows = []
     with open(out_dir / "results.jsonl", "w") as f:
@@ -129,6 +129,8 @@ def write_summary(rows: list[dict], out_dir: Path, stats: dict) -> None:
         f"| retrieval recall@5 (agent searches) | {statistics.mean(rec):.2f} |" if rec else "| retrieval recall@5 | n/a |",
         f"| citation hit rate | {sum(cites) / len(cites):.1%} |" if cites else "| citation hit rate | n/a |",
         f"| LLM calls / JSON repairs / JSON failures | {stats['calls']} / {stats['json_repairs']} / {stats['json_failures']} |",
+        f"| rate-limited retries (429) | {stats.get('rate_limited', 0)} |",
+        f"| unscored (judge errors) | {sum(r['method'] == 'judge_error' for r in rows)} |",
         "", "## Accuracy by question type", "", "| type | correct |", "|---|---|",
         *[f"| {t} | {v} |" for t, v in by_type.items()],
         "", "## Failure taxonomy", "", "| failure | count |", "|---|---|",
