@@ -1,6 +1,6 @@
 PY ?= .venv/bin/python
 
-.PHONY: setup data index index-bm25 index-local probe test floor baseline retrieval eval eval-quick safety api ui up gold
+.PHONY: setup data index index-bm25 index-local probe test floor baseline rescore audit retrieval eval eval-quick safety api ui up gold
 
 setup:            ## create venv and install
 	uv venv --python 3.12 .venv && uv pip install --python $(PY) -e ".[dev]"
@@ -31,6 +31,12 @@ floor:            ## what rules + XBRL + ratio tool answer with NO model (no end
 
 baseline:         ## Week 1: 3 prompting strategies x closed/oracle context
 	$(PY) -m eval.baselines --modes closed oracle naive_rag --limit 40
+
+rescore:          ## re-apply the figure gate to saved baseline results (no model calls)
+	$(PY) -m eval.rescore
+
+audit:            ## export 30 judged answers for a human to label (judge reliability)
+	$(PY) -m eval.judge_audit export eval/results/baselines/*.jsonl
 
 retrieval:        ## Week 2: recall@k ablation
 	$(PY) -m eval.retrieval_eval

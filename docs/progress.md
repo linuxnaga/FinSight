@@ -22,6 +22,19 @@ backoff (`LLM_MAX_RETRIES`, default 6). Baselines and the eval exclude calls tha
 failures) from accuracy and report them in their own column. In a live check (4 calls while another run was
 saturating the endpoint), five 429s were retried and all 4 calls succeeded.
 
+**LLM judge too lenient.** With rate limiting fixed, closed-book few-shot scored 37%, high for a 7B model with no
+documents. Reading the judged-correct answers showed the 7B judge accepting wrong figures and even contradictions:
+"inventory turnover is not meaningful" for gold 9.5x, J&J growth "6%" for gold 1.3%, AmEx tax rate 22.6% → 21.8%
+for gold 24.6% → 21.6%, "margins fluctuated" for gold "consistent". Fixes:
+* **figure gate** (`metrics.figure_gate`): if the gold states key figures, the answer must state at least one at the
+  gold's precision ("21.6%" ± 0.05, "23%" ± 0.5). It can only fail answers, never rescue them. Abstains when the gold
+  has no figures.
+* stricter judge rubric: a wrong key figure caps the score at 3; contradicting the gold or "not available" scores 1–2.
+* `make rescore` re-applies the gate to saved results without model calls; `make audit` exports 30 judged answers
+  for a teammate to label, and `python -m eval.judge_audit score ...` reports judge-vs-human agreement.
+
+Effect on the first gated runs (few-shot): closed-book 37% → **23%**, oracle 83% → **63%**.
+
 Re-scored with the strict metric: few-shot oracle numeric 2/11 → 1/11; other runs unchanged. The no-model floor
 stays at **26/33**: it only ever scored headline values, which the strict rule still allows.
 

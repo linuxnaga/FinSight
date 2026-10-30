@@ -78,3 +78,24 @@ def test_xbrl_original_filing_and_derived():
     assert get_fact("JNJ", "research_and_development", 2021)["value_millions"] == 14714.0  # not the stray 0
     assert get_fact("JNJ", "eps_diluted", 2022)["value"] == 6.73
     assert get_fact("ADBE", "sga", 2022)["xbrl_tag"].startswith("derived")
+
+
+@pytest.mark.parametrize("gold,answer,expected", [
+    # real judge false positives from the first Qwen baseline
+    ("AES has converted inventory 9.5 times in FY 2022.",
+     "AES's inventory turnover ratio for FY2022 is not meaningful as it has little inventory.", False),
+    ("No, JnJ's FY2022 financials are not of a high growth company as sales grew by 1.3% in FY2022.",
+     "JnJ's FY2022 financials do not indicate a high growth company. Revenue grew by 6% year-over-year.", False),
+    ("The effective tax rate changed from 24.6% in FY 2021 to 21.6% in FY 2022.",
+     "The effective tax rate was 22.6% for FY2021 and 21.8% for FY2022.", False),
+    # genuinely right answers still pass
+    ("The effective tax rate of Corning has changed from 20% in FY2021 to 23% in FY 2022.",
+     "The effective tax rate was 21.6% for FY2021 and 23.1% for FY2022.", True),
+    ("AES has converted inventory 9.5 times in FY 2022.", "Inventory turnover was about 9.46x.", True),
+    # gold without figures -> gate abstains, the judge decides
+    ("Yes, Boeing's business is subject to cyclicality.", "Boeing is cyclical.", None),
+    ("Amcor operates in packaging across 40 countries in 2022.", "Packaging.", False),
+])
+def test_figure_gate(gold, answer, expected):
+    from eval.metrics import figure_gate
+    assert figure_gate(gold, answer) is expected

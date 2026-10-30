@@ -79,6 +79,7 @@ Embeddings are cached by content hash, so re-indexing is free.
 | 1 | Write the breakage log from the baseline outputs | n/a | `eval/results/baselines/breakage_log.md` |
 | 2 | Chunking comparison | `python -m finsight.retrieval.index --strategy fixed --name fixed` (+ recursive) then `python -m eval.retrieval_eval --index fixed` | `eval/results/retrieval_*.md` |
 | 2 | Hybrid + rerank ablation | `make retrieval` | same |
+| 1 | Re-apply the figure gate to saved results; export judged answers for a human audit | `make rescore`, `make audit` | `eval/results/baselines/rescored.md`, `judge_audit.csv` |
 | any | No-LLM floor (rules + XBRL + ratios) | `make floor` | `eval/results/deterministic_floor.md` |
 | 3 | Agent eval on a daily subset | `make eval-quick` | `eval/results/<run>/summary.md` |
 | 3–4 | Full eval + failure taxonomy | `make eval` | same, plus traces |

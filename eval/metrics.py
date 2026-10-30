@@ -94,20 +94,68 @@ class Judgement(BaseModel):
     reason: str = Field(description="one sentence")
 
 
-JUDGE_PROMPT = """You grade answers to financial questions against a gold answer.
+JUDGE_PROMPT = """You grade answers to financial questions against a gold answer. Be strict.
 Rubric (score 1-5):
-5 - same conclusion and key figures as gold (small rounding differences are fine)
-4 - correct conclusion, minor detail missing or slightly different figure (<2%)
-3 - partially correct: right direction but a key figure or part is wrong/missing
-2 - mostly wrong but on topic
-1 - wrong, contradicts gold, or refuses/says not found when gold has an answer
-Judge only correctness versus gold, not style."""
+5 - same conclusion AND the same key figures as gold (rounding differences only)
+4 - same conclusion, key figures match within 2%, a minor detail missing
+3 - right direction, but a key figure is wrong or missing
+2 - on topic, but the conclusion differs from gold or most figures are wrong
+1 - contradicts gold, or says "not available / not meaningful / not provided" when gold has an answer
+Rules: a different number for a key figure caps the score at 3 even if the conclusion matches.
+If the gold says "yes"/"consistent"/"increased" and the answer says the opposite, score 1 or 2.
+Judge only correctness versus gold, not style or length."""
+
+_FIG = re.compile(r"(?<![\w.])-?\$?\(?(\d[\d,]*\.?\d*)\)?\s*(%|percent|x\b|times\b)?", re.I)
+
+
+def key_figures(gold_answer: str) -> list[tuple[float, float]]:
+    """(value, tolerance) for each figure a correct answer must state:
+    percentages, decimals and amounts in the gold answer; not years and not
+    small counts ("3 segments"). The tolerance follows the gold's precision:
+    "21.6%" must match to +-0.05 (half its last digit) and "23%" to +-0.5,
+    and never tighter than 0.5% relative."""
+    out = []
+    for m in _FIG.finditer(gold_answer or ""):
+        raw, unit = m.group(1).replace(",", ""), m.group(2)
+        try:
+            v = float(raw)
+        except ValueError:
+            continue
+        is_int = "." not in raw
+        if is_int and 1990 <= v <= 2035 and not unit:
+            continue  # a year
+        if is_int and v < 32 and not unit:
+            continue  # a count or an ordinal
+        decimals = len(raw.split(".")[1]) if "." in raw else 0
+        out.append((v, max(0.5 * 10 ** -decimals, 0.005 * v)))
+    return out
+
+
+def figure_gate(gold_answer: str, answer: str) -> bool | None:
+    """Deterministic check under the LLM judge. None if the gold states no key
+    figures; otherwise True only if the answer states at least one of them at
+    the gold's precision (unit scales x1, x1e3, x1e-3). The judge may fail an
+    answer that passes, never rescue one that fails: a 7B judge accepted
+    "turnover is not meaningful" for gold 9.5x."""
+    figs = key_figures(gold_answer)
+    if not figs:
+        return None
+    cands = [n for n in numbers_in(answer or "") if not (float(n).is_integer() and 1990 <= n <= 2035)]
+    for g, tol in figs:
+        for c in cands:
+            for scale in (1, 1e3, 1e-3):
+                if abs(abs(c * scale) - g) <= tol:
+                    return True
+    return False
 
 
 def judge(llm, question: str, gold: str, answer: str) -> Judgement:
     user = f"Question: {question}\n\nGold answer: {gold}\n\nCandidate answer: {answer}"
     j = llm.structured(JUDGE_PROMPT, user, Judgement, name="judge", max_tokens=150)
     j.correct = j.score >= 4
+    if j.correct and figure_gate(gold, answer) is False:
+        j.correct = False
+        j.reason = f"[figure gate: none of the gold's key figures {[v for v, _ in key_figures(gold)]} stated] {j.reason}"
     return j
 
 
